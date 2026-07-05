@@ -1,0 +1,12 @@
+# Rust
+/target
+
+# devenv / direnv
+.devenv/
+.devenv.flake.nix
+devenv.local.nix
+.direnv/
+
+# Build outputs
+/addons/godotty/bin/
+/dist/

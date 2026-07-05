@@ -1,0 +1,117 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  LIBGHOSTTY_VT_SYS_OPTIMIZE: ReleaseFast
+
+jobs:
+  linux:
+    # Oldest supported runner: the artifact's glibc floor is set here.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - run: |
+          mkdir -p bin
+          cp target/release/libgodotty.so bin/libgodotty.linux.x86_64.so
+          echo "glibc floor:"
+          objdump -T bin/libgodotty.linux.x86_64.so \
+            | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: bin/
+
+  macos:
+    # zig 0.15.2 cannot link against the Xcode 26 SDK on the macOS 26 image.
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      # Zig needs the SDK path spelled out or it links without libSystem.
+      - run: echo "SDKROOT=$(xcrun --show-sdk-path)" >> "$GITHUB_ENV"
+      - run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+      - run: |
+          mkdir -p bin
+          lipo -create \
+            target/aarch64-apple-darwin/release/libgodotty.dylib \
+            target/x86_64-apple-darwin/release/libgodotty.dylib \
+            -output bin/libgodotty.macos.dylib
+          codesign --force -s - bin/libgodotty.macos.dylib
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos
+          path: bin/
+
+  # Cross-compiled from Linux: Godot's Windows builds are MinGW/gnu, and a
+  # native VS runner would let Zig auto-detect msvc and mismatch the link.
+  windows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - name: Build godotty.dll
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+          RUSTFLAGS: "-C link-args=-static-libgcc"
+        run: cargo build --release --target x86_64-pc-windows-gnu
+      - name: Stage artifact
+        run: |
+          mkdir -p bin
+          cp target/x86_64-pc-windows-gnu/release/godotty.dll \
+             bin/libgodotty.windows.x86_64.dll
+          x86_64-w64-mingw32-objdump -p bin/libgodotty.windows.x86_64.dll \
+            | grep "DLL Name" | tee dlls.txt
+          # Fail on imports outside the Windows system set (e.g. libwinpthread).
+          ! grep -viE "kernel32|ws2_32|ntdll|msvcrt|advapi32|bcryptprimitives|api-ms-win" dlls.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: bin/
+
+  release:
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+      - run: |
+          mkdir -p addons/godotty/bin
+          cp artifacts/* addons/godotty/bin/
+          zip -qr "godotty-${{ github.ref_name }}.zip" addons
+      - uses: softprops/action-gh-release@v3
+        with:
+          files: godotty-*.zip
+          body: |
+            A full-featured yet light-weight terminal emulator for the Godot
+            Engine, written in Rust, powered by libghostty.
+
+            **Install:** download `godotty-${{ github.ref_name }}.zip` below and
+            extract it into your project root.
+
+            See the [README](https://github.com/ingur/godotty#readme) for usage.

@@ -1,0 +1,33 @@
+[package]
+name = "godotty"
+version = "0.9.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+# GDExtensions are loaded as dynamic libraries; gdext produces libgodotty.so.
+crate-type = ["cdylib"]
+
+# The editor loads the debug build; keep the FFI-heavy deps optimized.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+strip = true
+lto = "thin"
+
+[dependencies]
+godot = "0.5"
+libghostty-vt = "0.2"
+portable-pty = "0.9"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
+
+# Direct dep so build.rs receives DEP_GHOSTTY_VT_INCLUDE for the .lib alias.
+[target.'cfg(windows)'.dependencies]
+libghostty-vt-sys = "0.2"
