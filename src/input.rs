@@ -1,10 +1,12 @@
 use std::time::Instant;
 
-use godot::classes::{InputEventKey, InputEventMouseButton, InputEventWithModifiers};
+use godot::classes::{InputEventKey, InputEventWithModifiers};
 use godot::global::Key as GKey;
 use godot::obj::Gd;
 use libghostty_vt::key::{self, Key};
-use libghostty_vt::selection::gesture::{DragEvent, Geometry, Gesture, PressEvent, ReleaseEvent};
+use libghostty_vt::selection::gesture::{
+    Autoscroll, AutoscrollTickEvent, DragEvent, Geometry, Gesture, PressEvent, ReleaseEvent,
+};
 use libghostty_vt::terminal::{Point, PointCoordinate};
 use libghostty_vt::{Terminal, mouse};
 
@@ -41,7 +43,7 @@ impl MouseGeometry {
         }
     }
 
-    fn viewport_point(self, term: &Terminal<'static, 'static>, x: f32, y: f32) -> Point {
+    fn viewport_coord(self, term: &Terminal<'static, 'static>, x: f32, y: f32) -> PointCoordinate {
         let pad = self.padding as f32;
         let cols = term.cols().unwrap_or(1);
         let rows = term.rows().unwrap_or(1);
@@ -57,7 +59,11 @@ impl MouseGeometry {
         } else {
             0
         };
-        Point::Viewport(PointCoordinate { x: cx, y: cy })
+        PointCoordinate { x: cx, y: cy }
+    }
+
+    fn viewport_point(self, term: &Terminal<'static, 'static>, x: f32, y: f32) -> Point {
+        Point::Viewport(self.viewport_coord(term, x, y))
     }
 }
 
@@ -70,6 +76,7 @@ pub struct Input {
     press: PressEvent<'static>,
     release: ReleaseEvent<'static>,
     drag: DragEvent<'static>,
+    autoscroll: AutoscrollTickEvent<'static>,
     epoch: Instant,
     buf: Vec<u8>,
 }
@@ -87,6 +94,7 @@ impl Input {
             press,
             release: ReleaseEvent::new()?,
             drag: DragEvent::new()?,
+            autoscroll: AutoscrollTickEvent::new()?,
             epoch: Instant::now(),
             buf: Vec::with_capacity(64),
         })
@@ -203,17 +211,17 @@ impl Input {
         &self.buf
     }
 
-    /// Wheel tick as mouse button 4/5 press+release.
+    /// Wheel tick as a mouse button 4/5 press; wheel buttons never release.
     pub fn encode_scroll(
         &mut self,
         term: &Terminal<'static, 'static>,
-        ev: &Gd<InputEventMouseButton>,
         up: bool,
+        mods: key::Mods,
+        pos: (f32, f32),
         geo: MouseGeometry,
     ) -> &[u8] {
         self.buf.clear();
 
-        let pos = ev.get_position();
         let button = if up {
             mouse::Button::Four
         } else {
@@ -221,19 +229,15 @@ impl Input {
         };
 
         self.mouse_event
-            .set_mods(event_mods(ev.clone().upcast()))
-            .set_position(mouse::Position { x: pos.x, y: pos.y })
-            .set_button(Some(button));
-        self.mouse_encoder
+            .set_mods(mods)
+            .set_position(mouse::Position { x: pos.0, y: pos.1 })
+            .set_button(Some(button))
+            .set_action(mouse::Action::Press);
+        let _ = self
+            .mouse_encoder
             .set_options_from_terminal(term)
-            .set_size(geo.encoder_size());
-
-        for action in [mouse::Action::Press, mouse::Action::Release] {
-            self.mouse_event.set_action(action);
-            let _ = self
-                .mouse_encoder
-                .encode_to_vec(&self.mouse_event, &mut self.buf);
-        }
+            .set_size(geo.encoder_size())
+            .encode_to_vec(&self.mouse_event, &mut self.buf);
         &self.buf
     }
 
@@ -299,6 +303,41 @@ impl Input {
         let point = geo.viewport_point(term, x, y);
         let grid_ref = term.grid_ref(point).ok();
         let _ = self.release.apply(&mut self.gesture, term, grid_ref);
+    }
+
+    /// Scroll and extend the selection while a drag sits past the viewport
+    /// edges. Returns whether a tick ran.
+    pub fn selection_autoscroll(
+        &mut self,
+        term: &Terminal<'static, 'static>,
+        x: f32,
+        y: f32,
+        rectangle: bool,
+        geo: MouseGeometry,
+    ) -> bool {
+        if !matches!(
+            self.gesture.autoscroll(term),
+            Ok(Autoscroll::Up | Autoscroll::Down)
+        ) {
+            return false;
+        }
+        let viewport = geo.viewport_coord(term, x, y);
+        let selection = self
+            .autoscroll
+            .set_rectangle(rectangle)
+            .and_then(|e| e.set_position(f64::from(x), f64::from(y)))
+            .and_then(|e| {
+                e.apply(
+                    &mut self.gesture,
+                    term,
+                    viewport,
+                    geo.gesture_geometry(term),
+                )
+            });
+        if let Ok(selection) = selection {
+            let _ = term.set_selection(selection.as_ref());
+        }
+        true
     }
 }
 

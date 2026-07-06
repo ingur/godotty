@@ -7,14 +7,15 @@ use godot::classes::display_server::Feature as DisplayFeature;
 use godot::classes::notify::ControlNotification;
 use godot::classes::object::ConnectFlags;
 use godot::classes::{
-    Control, DisplayServer, EditorInterface, Engine, IControl, InputEvent, InputEventKey,
-    InputEventMouseButton, InputEventMouseMotion, Os, ProjectSettings, RenderingServer,
+    Control, DisplayServer, EditorInterface, Engine, IControl, Input as GdInput, InputEvent,
+    InputEventKey, InputEventMouseButton, InputEventMouseMotion, InputEventPanGesture, Os,
+    ProjectSettings, RenderingServer,
 };
 use godot::global::{Key as GKey, MouseButton, MouseButtonMask};
 use godot::prelude::*;
 use libghostty_vt::key::Mods as VtMods;
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, RenderState, RowIterator};
-use libghostty_vt::screen::CellWide;
+use libghostty_vt::screen::{CellWide, Screen};
 use libghostty_vt::selection::FormatOptions;
 use libghostty_vt::style::{RgbColor, Underline};
 use libghostty_vt::terminal::{
@@ -30,7 +31,7 @@ use crate::sprite;
 use crate::theme::{self, Theme};
 
 const PAD: f32 = 4.0;
-const SCROLL_LINES: isize = 3;
+const SCROLL_LINES: f64 = 3.0;
 const TITLE_POLL_SECS: f64 = 0.5;
 /// Parse pty output every frame, but re-record the grid at most this often.
 const REPAINT_MIN_SECS: f64 = 0.025;
@@ -38,6 +39,15 @@ const REPAINT_MIN_SECS: f64 = 0.025;
 /// spam-drawing the prompt and messing up the scrollback during resize.
 const RESIZE_SETTLE_SECS: f64 = 0.1;
 const MAX_SCROLLBACK: u32 = 100_000;
+/// Selection autoscroll scrolls one row per tick.
+const SELECTION_SCROLL_SECS: f64 = 0.015;
+/// Godot's macOS backend scales native scroll pixels by 0.03 into pan
+/// gesture deltas; Wayland forwards pixels unscaled.
+const PAN_TO_PIXELS: f64 = if cfg!(target_os = "macos") {
+    1.0 / 0.03
+} else {
+    1.0
+};
 
 #[derive(GodotClass)]
 #[class(tool, base = Control)]
@@ -158,10 +168,27 @@ impl IControl for Terminal {
     fn process(&mut self, delta: f64) {
         let control_size = self.base().get_size();
         let visible = self.base().is_visible_in_tree();
+        let mouse_pos = self.base().get_local_mouse_position();
         let Some(st) = self.state.as_mut() else {
             return;
         };
         st.writer.flush();
+
+        // A drag held past the edge keeps scrolling until released.
+        if st.selecting {
+            let rectangle = GdInput::singleton().is_key_pressed(GKey::ALT);
+            let geo = st.geo.mouse();
+            st.autoscroll_accum += delta;
+            while st.autoscroll_accum >= SELECTION_SCROLL_SECS {
+                st.autoscroll_accum -= SELECTION_SCROLL_SECS;
+                if st
+                    .input
+                    .selection_autoscroll(&st.vt, mouse_pos.x, mouse_pos.y, rectangle, geo)
+                {
+                    st.needs_paint = true;
+                }
+            }
+        }
 
         let mut dirty = st.needs_paint;
         if control_size.x != st.geo.width || control_size.y != st.geo.height {
@@ -248,8 +275,10 @@ impl IControl for Terminal {
             self.handle_key(&key);
         } else if let Ok(btn) = event.clone().try_cast::<InputEventMouseButton>() {
             self.handle_mouse_button(&btn);
-        } else if let Ok(motion) = event.try_cast::<InputEventMouseMotion>() {
+        } else if let Ok(motion) = event.clone().try_cast::<InputEventMouseMotion>() {
             self.handle_mouse_motion(&motion);
+        } else if let Ok(pan) = event.try_cast::<InputEventPanGesture>() {
+            self.handle_pan(&pan);
         }
     }
 
@@ -351,6 +380,17 @@ impl Terminal {
         let pos = btn.get_position();
         let mods = event_mods(btn.clone().upcast());
 
+        let wheel_up = index == MouseButton::WHEEL_UP;
+        if wheel_up || index == MouseButton::WHEEL_DOWN {
+            if pressed {
+                // Godot reports partial wheel ticks via the event factor.
+                let ticks = f64::from(btn.get_factor());
+                self.scroll(if wheel_up { ticks } else { -ticks }, false, mods, pos);
+                self.base_mut().accept_event();
+            }
+            return;
+        }
+
         let mut handled = false;
         if let Some(st) = self.state.as_mut() {
             let geo = st.geo.mouse();
@@ -360,23 +400,7 @@ impl Terminal {
                 && st.vt.is_mouse_tracking().unwrap_or(false)
                 && !mods.contains(VtMods::SHIFT);
 
-            let wheel_up = index == MouseButton::WHEEL_UP;
-            if wheel_up || index == MouseButton::WHEEL_DOWN {
-                if pressed {
-                    if tracking {
-                        let bytes = st.input.encode_scroll(&st.vt, btn, wheel_up, geo);
-                        st.writer.write(bytes);
-                    } else {
-                        let delta = if wheel_up {
-                            -SCROLL_LINES
-                        } else {
-                            SCROLL_LINES
-                        };
-                        st.vt.scroll_viewport(ScrollViewport::Delta(delta));
-                    }
-                    handled = true;
-                }
-            } else if index == MouseButton::LEFT {
+            if index == MouseButton::LEFT {
                 // A selection in progress always completes on release, even
                 // if Shift was let go first (which would re-enable tracking).
                 if !pressed && st.selecting {
@@ -428,6 +452,79 @@ impl Terminal {
         if handled {
             self.base_mut().accept_event();
         }
+    }
+
+    /// Scroll by pixels (precision) or wheel ticks, positive up: mouse
+    /// reporting, alternate scroll, or the viewport, like ghostty.
+    fn scroll(&mut self, yoff: f64, precision: bool, mods: VtMods, pos: Vector2) {
+        let Some(st) = self.state.as_mut() else {
+            return;
+        };
+
+        let cell = f64::from(st.geo.cell_h).max(1.0);
+        let adjusted = if precision {
+            yoff
+        } else {
+            // Undo Godot's 0.3 wheel scale and ramp slow fractional notches to a full tick.
+            let ticks = if cfg!(target_os = "macos") {
+                let raw = yoff / 0.3;
+                raw.signum() * raw.abs().max(1.0)
+            } else {
+                yoff
+            };
+            ticks * cell * SCROLL_LINES
+        };
+
+        let poff = st.pending_scroll + adjusted;
+        if poff.abs() < cell {
+            st.pending_scroll = poff;
+            return;
+        }
+        let lines = (poff / cell).trunc();
+        st.pending_scroll = poff - lines * cell;
+
+        let tracking = !st.exited
+            && st.vt.is_mouse_tracking().unwrap_or(false)
+            && !mods.contains(VtMods::SHIFT);
+        let alt_scroll = !st.exited
+            && st.vt.active_screen().ok() == Some(Screen::Alternate)
+            && st.vt.mode(Mode::ALT_SCROLL).unwrap_or(false);
+
+        if tracking {
+            let _ = st.vt.set_selection(None);
+            let geo = st.geo.mouse();
+            for _ in 0..lines.abs() as usize {
+                let bytes = st
+                    .input
+                    .encode_scroll(&st.vt, lines > 0.0, mods, (pos.x, pos.y), geo);
+                st.writer.write(bytes);
+            }
+        } else if alt_scroll {
+            let _ = st.vt.set_selection(None);
+            let app_keys = st.vt.mode(Mode::DECCKM).unwrap_or(false);
+            let seq: &[u8] = match (app_keys, lines > 0.0) {
+                (true, true) => b"\x1bOA",
+                (true, false) => b"\x1bOB",
+                (false, true) => b"\x1b[A",
+                (false, false) => b"\x1b[B",
+            };
+            for _ in 0..lines.abs() as usize {
+                st.writer.write(seq);
+            }
+        } else {
+            st.vt
+                .scroll_viewport(ScrollViewport::Delta(-(lines as isize)));
+        }
+        st.needs_paint = true;
+    }
+
+    /// macOS and Wayland deliver trackpad scrolling as pan gestures rather
+    /// than wheel buttons.
+    fn handle_pan(&mut self, pan: &Gd<InputEventPanGesture>) {
+        let mods = event_mods(pan.clone().upcast());
+        let yoff = f64::from(-pan.get_delta().y) * PAN_TO_PIXELS;
+        self.scroll(yoff, true, mods, pan.get_position());
+        self.base_mut().accept_event();
     }
 
     fn handle_mouse_motion(&mut self, motion: &Gd<InputEventMouseMotion>) {
@@ -561,6 +658,8 @@ struct State {
     exited: bool,
     eof: bool,
     selecting: bool,
+    pending_scroll: f64,
+    autoscroll_accum: f64,
     focused: bool,
     win_focused: bool,
     title: String,
@@ -705,6 +804,8 @@ impl State {
             exited: false,
             eof: false,
             selecting: false,
+            pending_scroll: 0.0,
+            autoscroll_accum: 0.0,
             focused: false,
             win_focused: true,
             title: String::new(),
