@@ -2,7 +2,7 @@
   <h1 align="center">Godotty</h1>
 </p>
 
-<img width="2560" height="1440" alt="Godotty" src="https://github.com/user-attachments/assets/d7c7f5ad-f2ea-439d-9ebd-0bd6bface425" />
+<img width="2560" height="1440" alt="godotty" src="https://github.com/user-attachments/assets/b3d2b8f8-1e39-4a9c-bbf7-2752c6660e07" />
 
 <p align="center">
   A full-featured yet light-weight terminal emulator for the <a href=https://godotengine.org>Godot Engine</a>, powered by <a href=https://ghostty.org>libghostty</a>.
