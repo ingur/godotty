@@ -26,6 +26,7 @@ use libghostty_vt::{Error as VtError, Terminal as Vt, TerminalOptions, mouse, pa
 use crate::font::Fonts;
 use crate::input::{Input, MouseGeometry, event_mods};
 use crate::pty::{Drained, Pty, Writer};
+use crate::sprite;
 use crate::theme::{self, Theme};
 
 const PAD: f32 = 4.0;
@@ -452,6 +453,8 @@ struct Geometry {
     cell_w: f32,
     cell_h: f32,
     ascent: f32,
+    /// Base sprite stroke width: the font's underline thickness.
+    thick: f32,
     cols: u16,
     rows: u16,
     width: f32,
@@ -568,6 +571,11 @@ impl State {
         let cell_w = primary.get_char_size('M' as u32, font_size).x.ceil();
         let cell_h = primary.get_height_ex().font_size(font_size).done().ceil();
         let ascent = primary.get_ascent_ex().font_size(font_size).done().round();
+        let thick = primary
+            .get_underline_thickness_ex()
+            .font_size(font_size)
+            .done()
+            .max(1.0);
         if cell_w <= 0.0 || cell_h <= 0.0 {
             return Err("font produced zero cell size".into());
         }
@@ -576,6 +584,7 @@ impl State {
             cell_w,
             cell_h,
             ascent,
+            thick,
             cols: 0,
             rows: 0,
             width: 0.0,
@@ -910,6 +919,9 @@ impl State {
                 }
                 for ch in &chars[..count] {
                     let cp = *ch as u32;
+                    if sprite::draw(canvas, cell_rect, fg, self.geo.thick, cp) {
+                        continue;
+                    }
                     if let Some(font) = self.fonts.resolve(cp, style, wide) {
                         font.draw_char_ex(canvas, baseline, cp, self.font_size)
                             .modulate(fg)
@@ -949,8 +961,15 @@ impl State {
             if let Some((chars, count, style, baseline, wide)) = cursor_cell {
                 // Godot leaves color glyphs untinted, matching ghostty.
                 let text = color(colors.background);
+                let cell = Rect2::new(
+                    Vector2::new(baseline.x, baseline.y - self.geo.ascent),
+                    Vector2::new(self.geo.cell_w, self.geo.cell_h),
+                );
                 for ch in &chars[..count] {
                     let cp = *ch as u32;
+                    if sprite::draw(canvas, cell, text, self.geo.thick, cp) {
+                        continue;
+                    }
                     if let Some(font) = self.fonts.resolve(cp, style, || wide) {
                         font.draw_char_ex(canvas, baseline, cp, self.font_size)
                             .modulate(text)
