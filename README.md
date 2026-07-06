@@ -5,7 +5,7 @@
 <img width="2560" height="1440" alt="Godotty" src="https://github.com/user-attachments/assets/d7c7f5ad-f2ea-439d-9ebd-0bd6bface425" />
 
 <p align="center">
-  A full-featured yet light-weight terminal emulator for the <a href=https://godotengine.org>Godot Engine</a>, written in Rust, powered by <a href=https://ghostty.org>libghostty</a>.
+  A full-featured yet light-weight terminal emulator for the <a href=https://godotengine.org>Godot Engine</a>, powered by <a href=https://ghostty.org>libghostty</a>.
 </p>
 
 <p align="center">
