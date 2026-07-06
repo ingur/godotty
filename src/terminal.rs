@@ -13,7 +13,7 @@ use godot::classes::{
 use godot::global::{Key as GKey, MouseButton, MouseButtonMask};
 use godot::prelude::*;
 use libghostty_vt::key::Mods as VtMods;
-use libghostty_vt::render::{CellIterator, RenderState, RowIterator};
+use libghostty_vt::render::{CellIterator, CursorVisualStyle, RenderState, RowIterator};
 use libghostty_vt::screen::CellWide;
 use libghostty_vt::selection::FormatOptions;
 use libghostty_vt::style::{RgbColor, Underline};
@@ -263,6 +263,19 @@ impl IControl for Terminal {
             st.title.clear();
             st.title_timer = TITLE_POLL_SECS;
         }
+        if (what == ControlNotification::FOCUS_ENTER || what == ControlNotification::FOCUS_EXIT)
+            && let Some(st) = self.state.as_mut()
+        {
+            st.focused = what == ControlNotification::FOCUS_ENTER;
+            st.needs_paint = true;
+        }
+        if (what == ControlNotification::WM_WINDOW_FOCUS_IN
+            || what == ControlNotification::WM_WINDOW_FOCUS_OUT)
+            && let Some(st) = self.state.as_mut()
+        {
+            st.win_focused = what == ControlNotification::WM_WINDOW_FOCUS_IN;
+            st.needs_paint = true;
+        }
         if what == ControlNotification::THEME_CHANGED {
             self.refresh_theme();
         }
@@ -453,8 +466,11 @@ struct Geometry {
     cell_w: f32,
     cell_h: f32,
     ascent: f32,
-    /// Base sprite stroke width: the font's underline thickness.
+    /// Base stroke width for sprites, underlines and cursors: the font's
+    /// underline thickness. Whole pixels.
     thick: f32,
+    /// Underline offset from the cell top, from the font metrics.
+    underline: f32,
     cols: u16,
     rows: u16,
     width: f32,
@@ -545,6 +561,8 @@ struct State {
     exited: bool,
     eof: bool,
     selecting: bool,
+    focused: bool,
+    win_focused: bool,
     title: String,
     title_timer: f64,
     canvas: Rid,
@@ -575,7 +593,12 @@ impl State {
             .get_underline_thickness_ex()
             .font_size(font_size)
             .done()
+            .round()
             .max(1.0);
+        let underline = primary
+            .get_underline_position_ex()
+            .font_size(font_size)
+            .done();
         if cell_w <= 0.0 || cell_h <= 0.0 {
             return Err("font produced zero cell size".into());
         }
@@ -585,6 +608,7 @@ impl State {
             cell_h,
             ascent,
             thick,
+            underline: (ascent + underline).round(),
             cols: 0,
             rows: 0,
             width: 0.0,
@@ -681,6 +705,8 @@ impl State {
             exited: false,
             eof: false,
             selecting: false,
+            focused: false,
+            win_focused: true,
             title: String::new(),
             title_timer: TITLE_POLL_SECS,
             canvas: {
@@ -841,6 +867,11 @@ impl State {
         // The cursor cell's glyphs, redrawn over the cursor block.
         let mut cursor_cell = None;
 
+        let thick = self.geo.thick;
+        // One baseline rule for text underlines and the underline cursor,
+        // clamped so the line cannot escape the cell.
+        let underline_y = self.geo.underline.min(self.geo.cell_h - thick);
+
         let mut chars = ['\0'; 8];
         let mut row_it = self.rows.update(&snapshot)?;
         let mut y = PAD;
@@ -931,8 +962,8 @@ impl State {
 
                 if underline {
                     let line = Rect2::new(
-                        Vector2::new(x, y + self.geo.ascent + 1.0),
-                        Vector2::new(self.geo.cell_w, 1.0),
+                        Vector2::new(x, y + underline_y),
+                        Vector2::new(self.geo.cell_w, thick),
                     );
                     rs.canvas_item_add_rect(canvas, line, fg);
                 }
@@ -945,35 +976,78 @@ impl State {
         }
 
         if let Some(vp) = cursor_vp {
-            let cursor = colors.cursor.unwrap_or(colors.foreground);
+            let c = color(colors.cursor.unwrap_or(colors.foreground));
             let wide_cursor = matches!(&cursor_cell, Some((.., true)));
-            let rect = Rect2::new(
-                Vector2::new(
-                    PAD + f32::from(vp.x) * self.geo.cell_w,
-                    PAD + vp.y as f32 * self.geo.cell_h,
-                ),
-                Vector2::new(
-                    self.geo.cell_w * if wide_cursor { 2.0 } else { 1.0 },
-                    self.geo.cell_h,
-                ),
+            let origin = Vector2::new(
+                PAD + f32::from(vp.x) * self.geo.cell_w,
+                PAD + vp.y as f32 * self.geo.cell_h,
             );
-            rs.canvas_item_add_rect(canvas, rect, color(cursor));
-            if let Some((chars, count, style, baseline, wide)) = cursor_cell {
-                // Godot leaves color glyphs untinted, matching ghostty.
-                let text = color(colors.background);
-                let cell = Rect2::new(
-                    Vector2::new(baseline.x, baseline.y - self.geo.ascent),
-                    Vector2::new(self.geo.cell_w, self.geo.cell_h),
-                );
-                for ch in &chars[..count] {
-                    let cp = *ch as u32;
-                    if sprite::draw(canvas, cell, text, self.geo.thick, cp) {
-                        continue;
+            let size = Vector2::new(
+                self.geo.cell_w * if wide_cursor { 2.0 } else { 1.0 },
+                self.geo.cell_h,
+            );
+            // Unfocused terminals always show a hollow block; the control
+            // and its window must both hold focus to count as focused.
+            let cursor_style = if self.focused && self.win_focused {
+                snapshot.cursor_visual_style()?
+            } else {
+                CursorVisualStyle::BlockHollow
+            };
+            match cursor_style {
+                // Centered on the cell's left edge, between characters.
+                CursorVisualStyle::Bar => rs.canvas_item_add_rect(
+                    canvas,
+                    Rect2::new(
+                        Vector2::new(origin.x - ((thick + 1.0) / 2.0).floor(), origin.y),
+                        Vector2::new(thick, size.y),
+                    ),
+                    c,
+                ),
+                CursorVisualStyle::Underline => rs.canvas_item_add_rect(
+                    canvas,
+                    Rect2::new(
+                        Vector2::new(origin.x, origin.y + underline_y),
+                        Vector2::new(size.x, thick),
+                    ),
+                    c,
+                ),
+                CursorVisualStyle::BlockHollow => {
+                    let t = thick.min(size.x / 2.0).min(size.y / 2.0);
+                    for [x0, y0, x1, y1] in [
+                        [0.0, 0.0, size.x, t],
+                        [0.0, size.y - t, size.x, size.y],
+                        [0.0, t, t, size.y - t],
+                        [size.x - t, t, size.x, size.y - t],
+                    ] {
+                        let frame = Rect2::new(
+                            Vector2::new(origin.x + x0, origin.y + y0),
+                            Vector2::new(x1 - x0, y1 - y0),
+                        );
+                        rs.canvas_item_add_rect(canvas, frame, c);
                     }
-                    if let Some(font) = self.fonts.resolve(cp, style, || wide) {
-                        font.draw_char_ex(canvas, baseline, cp, self.font_size)
-                            .modulate(text)
-                            .done();
+                }
+                // Block, and any future style, as the filled block; only
+                // this style repaints the glyph underneath.
+                _ => {
+                    rs.canvas_item_add_rect(canvas, Rect2::new(origin, size), c);
+                    if let Some((chars, count, style, baseline, wide)) = cursor_cell {
+                        // Godot leaves color glyphs untinted, matching ghostty.
+                        let text = color(colors.background);
+                        let cell = Rect2::new(
+                            Vector2::new(baseline.x, baseline.y - self.geo.ascent),
+                            Vector2::new(self.geo.cell_w, self.geo.cell_h),
+                        );
+                        for ch in &chars[..count] {
+                            let cp = *ch as u32;
+                            if sprite::draw(canvas, cell, text, self.geo.thick, cp) {
+                                continue;
+                            }
+                            if let Some(font) = self.fonts.resolve(cp, style, || wide) {
+                                font.draw_char_ex(canvas, baseline, cp, self.font_size)
+                                    .modulate(text)
+                                    .done();
+                            }
+                        }
                     }
                 }
             }
