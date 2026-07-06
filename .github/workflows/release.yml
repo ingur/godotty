@@ -109,7 +109,7 @@ jobs:
           files: godotty-*.zip
           body: |
             A full-featured yet light-weight terminal emulator for the Godot
-            Engine, written in Rust, powered by libghostty.
+            Engine, powered by libghostty.
 
             **Install:** download `godotty-${{ github.ref_name }}.zip` below and
             extract it into your project root.
