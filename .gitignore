@@ -1,5 +1,6 @@
 # Rust
 /target
+/.cargo/
 
 # devenv / direnv
 .devenv/
@@ -10,3 +11,6 @@ devenv.local.nix
 # Build outputs
 /addons/godotty/bin/
 /dist/
+
+# Godot
+*.uid
