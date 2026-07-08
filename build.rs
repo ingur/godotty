@@ -5,10 +5,22 @@ fn main() {
     if !target.contains("windows") {
         return;
     }
+
+    // Link MSVC runtime libraries. Only applies to MSVC targets; MinGW provides its own.
+    // vcruntime: memcpy, memset, memmove, __CxxFrameHandler3, _CxxThrowException
+    // ucrt: ceilf, floorf, sinf, cosf, strlen, free, ...
+    if target.contains("msvc") {
+        println!("cargo:rustc-link-lib=dylib=vcruntime");
+        println!("cargo:rustc-link-lib=dylib=ucrt");
+    }
+
     let Ok(include) = std::env::var("DEP_GHOSTTY_VT_INCLUDE") else {
         return;
     };
-    let lib = std::path::Path::new(&include).parent().unwrap().join("lib");
+    let Some(parent) = std::path::Path::new(&include).parent() else {
+        return;
+    };
+    let lib = parent.join("lib");
     let src = lib.join("ghostty-vt-static.lib");
     let dst = lib.join("libghostty-vt.a");
     if src.exists() && !dst.exists() {

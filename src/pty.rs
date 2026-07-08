@@ -1,16 +1,17 @@
 use std::path::Path;
+use std::sync::OnceLock;
 
 use portable_pty::{CommandBuilder, PtySize};
 
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
-pub use unix::{Pty, Writer};
+pub use unix::{default_shell, Pty, Writer};
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::{Pty, Writer};
+pub use windows::{default_shell, Pty, Writer};
 
 /// Identity of the terminal a process runs inside; inherited values are wrong.
 /// Bit of a hack, but fixed a lot of issues I faced during testing.
@@ -98,4 +99,24 @@ fn size(cols: u16, rows: u16, cell_w: u16, cell_h: u16) -> PtySize {
         pixel_width: cols.saturating_mul(cell_w),
         pixel_height: rows.saturating_mul(cell_h),
     }
+}
+
+#[derive(Clone)]
+pub struct ShellProfile {
+    pub name: String,
+    pub path: String,
+}
+
+pub fn get_available_shells() -> &'static Vec<ShellProfile> {
+    static SHELLS: OnceLock<Vec<ShellProfile>> = OnceLock::new();
+    SHELLS.get_or_init(|| {
+        #[cfg(windows)]
+        {
+            crate::pty::windows::get_available_shells()
+        }
+        #[cfg(unix)]
+        {
+            crate::pty::unix::get_available_shells()
+        }
+    })
 }

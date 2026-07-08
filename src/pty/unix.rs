@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::io;
 use std::os::fd::{BorrowedFd, OwnedFd};
 use std::rc::Rc;
+use std::sync::OnceLock;
 
 use portable_pty::{Child, ExitStatus, MasterPty, native_pty_system};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
@@ -84,7 +85,7 @@ impl Pty {
             .map(str::to_owned)
             .or_else(|| std::env::var("SHELL").ok())
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "/bin/sh".into());
+            .unwrap_or_else(|| default_shell().path.to_string());
         let cmd = super::command(&shell, &opts);
 
         let child = pair.slave.spawn_command(cmd).map_err(io::Error::other)?;
@@ -180,4 +181,74 @@ fn foreground_process_name(shell_pid: u32) -> Option<String> {
 #[cfg(not(target_os = "linux"))]
 fn foreground_process_name(_shell_pid: u32) -> Option<String> {
     None
+}
+
+pub fn get_available_shells() -> Vec<super::ShellProfile> {
+    let candidates = [
+        ("bash", "/bin/bash"),
+        ("bash", "/usr/bin/bash"),
+        ("sh", "/bin/sh"),
+        ("zsh", "/bin/zsh"),
+        ("zsh", "/usr/bin/zsh"),
+        ("fish", "/usr/bin/fish"),
+
+        // Less Common
+        ("nushell", "/usr/bin/nu"),
+        ("nushell", "/usr/local/bin/nu"),
+        ("elvish", "/usr/bin/elvish"),
+        ("elvish", "/usr/local/bin/elvish"),
+        ("xonsh", "/usr/bin/xonsh"),
+        ("xonsh", "/usr/local/bin/xonsh"),
+        ("oil", "/usr/bin/osh"),
+        ("oil", "/usr/local/bin/osh"),
+        ("tcsh", "/bin/tcsh"),
+        ("tcsh", "/usr/bin/tcsh"),
+        ("csh", "/bin/csh"),
+        ("csh", "/usr/bin/csh"),
+        ("ksh", "/bin/ksh"),
+        ("ksh", "/usr/bin/ksh"),
+        ("ksh93", "/bin/ksh93"),
+        ("ksh93", "/usr/bin/ksh93"),
+        ("dash", "/bin/dash"),
+        ("dash", "/usr/bin/dash"),
+        ("ash", "/bin/ash"),
+        ("ash", "/usr/bin/ash"),
+        ("ion", "/usr/bin/ion"),
+        ("ion", "/usr/local/bin/ion"),
+        ("rc", "/bin/rc"),
+        ("rc", "/usr/bin/rc"),
+    ];
+
+    let mut seen = std::collections::HashSet::new();
+    let mut shells = Vec::new();
+
+    for (name, path) in candidates {
+        if std::path::Path::new(path).is_file() && seen.insert(path) {
+            shells.push(super::ShellProfile {
+                name: name.to_string(),
+                path: path.to_string(),
+            });
+        }
+    }
+
+    shells
+}
+
+pub fn default_shell() -> super::ShellProfile {
+    static CACHED: OnceLock<super::ShellProfile> = OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            std::env::var("SHELL")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| {
+                    let name = s.rsplit('/').next().unwrap_or("shell").to_string();
+                    super::ShellProfile { name, path: s }
+                })
+                .unwrap_or(super::ShellProfile {
+                    name: "sh".to_string(),
+                    path: "/bin/sh".to_string(),
+                })
+        })
+        .clone()
 }

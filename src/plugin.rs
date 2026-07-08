@@ -6,12 +6,14 @@ use godot::classes::tab_bar::CloseButtonDisplayPolicy;
 use godot::classes::{
     Button, CenterContainer, Control, EditorInterface, EditorPlugin, EditorSettings, HBoxContainer,
     IEditorPlugin, IVBoxContainer, InputEvent, InputEventKey, Label, MarginContainer,
-    PanelContainer, Shortcut, TabBar, TabContainer, Texture2D, VBoxContainer,
+    PanelContainer, PopupMenu, Shortcut, TabBar, TabContainer, Texture2D, VBoxContainer,
 };
 use godot::global::HorizontalAlignment;
 use godot::prelude::*;
+use godot::builtin::Vector2i;
 use godot::register::info::PropertyHint;
 
+use crate::pty;
 use crate::terminal::Terminal;
 
 /// Editor chords the terminal leaves unconsumed, comma separated.
@@ -43,27 +45,79 @@ pub struct TerminalTabs {
     bar: Option<Gd<TabBar>>,
     stack: Option<Gd<MarginContainer>>,
     empty: Option<Gd<CenterContainer>>,
+    popup: Option<Gd<PopupMenu>>,
+    shell_select: Option<Gd<Button>>,
+    shell_profiles: Vec<pty::ShellProfile>,
 }
 
 #[godot_api]
 impl TerminalTabs {
     #[func]
     pub fn add_terminal(&mut self) {
+        self.add_terminal_with_shell(GString::new(), GString::new());
+    }
+
+    #[func]
+    fn add_terminal_with_shell(&mut self, shell: GString, name: GString) {
         if self.stack.is_none() || self.bar.is_none() {
             return;
         }
-        let terminal = new_wired_terminal(self.to_gd().upcast());
+        let shell_str = shell.to_string();
+        let terminal = new_wired_terminal(self.to_gd().upcast(), &shell_str);
         let (Some(stack), Some(bar)) = (self.stack.as_mut(), self.bar.as_mut()) else {
             return;
         };
         stack.add_child(&terminal);
-        bar.add_tab_ex().title(&default_title()).done();
+        let tab_title = if !name.is_empty() {
+            name.to_string()
+        } else {
+            default_title(&shell_str)
+        };
+        bar.add_tab_ex().title(&tab_title).done();
         let last = bar.get_tab_count() - 1;
         // Tabs carry the terminal's identity so order can always be resynced.
         bar.set_tab_metadata(last, &terminal.instance_id().to_i64().to_variant());
         bar.set_current_tab(last);
         self.show_only(last);
         self.update_empty();
+    }
+
+    #[func]
+    fn on_shell_select_pressed(&mut self) {
+        let Some(popup) = self.popup.as_ref() else {
+            return;
+        };
+        let mut popup = popup.clone();
+        popup.clear();
+        self.shell_profiles = pty::get_available_shells().to_vec();
+        for profile in &self.shell_profiles {
+            let name: GString = (&profile.name).into();
+            popup.add_item(&name);
+        }
+        let mut positioned = false;
+        if let Some(btn) = self.shell_select.as_ref() {
+            let ctrl = btn.clone().upcast::<Control>();
+            let pos = ctrl.get_global_position();
+            let size = ctrl.get_size();
+            popup.set_position(Vector2i::new(
+                pos.x as i32,
+                (pos.y + size.y) as i32,
+            ));
+            positioned = true;
+        }
+        if !positioned {
+            popup.set_position(Vector2i::new(0, 0));
+        }
+        popup.popup();
+    }
+
+    #[func]
+    fn on_shell_selected(&mut self, id: i32) {
+        if id < 0 || (id as usize) >= self.shell_profiles.len() {
+            return;
+        }
+        let profile = &self.shell_profiles[id as usize];
+        self.add_terminal_with_shell(profile.path.as_str().into(), profile.name.as_str().into());
     }
 
     /// Focus the active tab's terminal, creating one when there is none.
@@ -109,13 +163,20 @@ impl TerminalTabs {
         let Ok(terminal) = terminal.try_to::<Gd<Terminal>>() else {
             return;
         };
-        if title.is_empty() {
-            return;
-        }
+        let display_name = if !title.is_empty() {
+            default_title(&title.to_string())
+        } else {
+            let shell_name = terminal.bind().shell.to_string();
+            if shell_name.is_empty() {
+                default_title("")
+            } else {
+                default_title(&shell_name)
+            }
+        };
         let tab = terminal.get_index();
         let Some(bar) = self.bar.as_mut() else { return };
         if tab >= 0 && tab < bar.get_tab_count() {
-            bar.set_tab_title(tab, &title);
+            bar.set_tab_title(tab, &display_name);
         }
     }
 
@@ -221,7 +282,7 @@ impl IVBoxContainer for TerminalTabs {
         );
         row.add_child(&bar);
         let mut add = Button::new_alloc();
-        add.set_tooltip_text("New terminal");
+        add.set_tooltip_text("New terminal (default shell)");
         add.set_flat(true);
         match editor_icon("Add") {
             Some(icon) => add.set_button_icon(&icon),
@@ -229,6 +290,23 @@ impl IVBoxContainer for TerminalTabs {
         }
         add.connect("pressed", &self.to_gd().callable("add_terminal"));
         row.add_child(&add);
+
+        let mut shell_select = Button::new_alloc();
+        shell_select.set_tooltip_text("New terminal (select shell)");
+        shell_select.set_flat(true);
+        match editor_icon("FileDialog") {
+            Some(icon) => shell_select.set_button_icon(&icon),
+            None => shell_select.set_text("▼"),
+        }
+        shell_select.connect("pressed", &self.to_gd().callable("on_shell_select_pressed"));
+        row.add_child(&shell_select);
+
+        let mut popup = PopupMenu::new_alloc();
+        popup.connect(
+            "id_pressed",
+            &self.to_gd().callable("on_shell_selected"),
+        );
+        self.base_mut().add_child(&popup);
         self.base_mut().add_child(&row);
 
         let mut panel = PanelContainer::new_alloc();
@@ -255,6 +333,8 @@ impl IVBoxContainer for TerminalTabs {
         self.bar = Some(bar);
         self.stack = Some(stack);
         self.empty = Some(empty);
+        self.popup = Some(popup);
+        self.shell_select = Some(shell_select);
     }
 
     /// A visited empty tab area creates its first terminal.
@@ -296,12 +376,12 @@ impl TerminalPanel {
         }
         self.count += 1;
         let title = if self.count == 1 {
-            default_title()
+            default_title("".into())
         } else {
-            format!("{} ({})", default_title(), self.count)
+            format!("{} ({})", default_title("".into()), self.count)
         };
 
-        let mut terminal = new_wired_terminal(self.to_gd().upcast());
+        let mut terminal = new_wired_terminal(self.to_gd().upcast(), "");
         terminal.set_name(title.as_str());
         terminal.set_custom_minimum_size(Vector2::new(200.0, 150.0));
 
@@ -396,16 +476,23 @@ impl TerminalPanel {
         let Ok(terminal) = terminal.try_to::<Gd<Terminal>>() else {
             return;
         };
-        if title.is_empty() {
-            return;
-        }
+        let display_name = if !title.is_empty() {
+            default_title(&title.to_string())
+        } else {
+            let shell_name = terminal.bind().shell.to_string();
+            if shell_name.is_empty() {
+                default_title("")
+            } else {
+                default_title(&shell_name)
+            }
+        };
         let mut child: Gd<Node> = terminal.clone().upcast();
         while let Some(parent) = child.get_parent() {
             if let Ok(mut tabs) = parent.clone().try_cast::<TabContainer>() {
                 if let Ok(control) = child.try_cast::<Control>() {
                     let tab = tabs.get_tab_idx_from_control(&control);
                     if tab >= 0 {
-                        tabs.set_tab_title(tab, &title);
+                        tabs.set_tab_title(tab, &display_name);
                     }
                 }
                 return;
@@ -419,7 +506,7 @@ impl TerminalPanel {
             .get_window()
             .filter(|window| Some(window) != editor_window.as_ref());
         if let Some(mut window) = floating {
-            window.set_title(&title);
+            window.set_title(&display_name);
         }
     }
 }
@@ -574,12 +661,14 @@ impl IEditorPlugin for TerminalPanel {
 /// A Terminal with its title_changed/exited signals wired to the owner's
 /// on_title_changed/on_exited, deferred because they are emitted while the
 /// Terminal is mutably bound.
-fn new_wired_terminal(owner: Gd<Object>) -> Gd<Terminal> {
+fn new_wired_terminal(owner: Gd<Object>, shell: &str) -> Gd<Terminal> {
     let mut terminal = Terminal::new_alloc();
     {
         let mut t = terminal.bind_mut();
         t.run_in_editor = true;
-        if let Some(shell) = configured_shell() {
+        if !shell.is_empty() {
+            t.shell = shell.into();
+        } else if let Some(shell) = configured_shell() {
             t.shell = shell.as_str().into();
         }
     }
@@ -652,16 +741,28 @@ fn configured_shell() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-fn default_title() -> String {
-    let shell = configured_shell()
-        .or_else(|| std::env::var("SHELL").ok())
-        .unwrap_or_default();
-    shell
-        .rsplit(['/', '\\'])
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("shell")
-        .to_string()
+fn default_title(shell_path: &str) -> String {
+    let path = if shell_path.is_empty() {
+        configured_shell()
+            .or_else(|| std::env::var("SHELL").ok())
+            .unwrap_or_default()
+    } else {
+        shell_path.to_string()
+    };
+    if !path.is_empty() {
+        for profile in pty::get_available_shells().iter() {
+            if profile.path == path {
+                return profile.name.clone();
+            }
+        }
+        if let Some(name) = std::path::Path::new(&path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+        {
+            return name.to_string();
+        }
+    }
+    pty::default_shell().name
 }
 
 fn editor_icon(name: &str) -> Option<Gd<Texture2D>> {

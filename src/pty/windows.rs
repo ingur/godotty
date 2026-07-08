@@ -44,7 +44,7 @@ impl Pty {
             .shell
             .map(str::to_owned)
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(default_shell);
+            .unwrap_or_else(|| default_shell().path.to_string());
         let cmd = super::command(&shell, &opts);
 
         let child = pair.slave.spawn_command(cmd).map_err(io::Error::other)?;
@@ -150,16 +150,29 @@ impl Drop for Pty {
     }
 }
 
-fn default_shell() -> String {
+pub fn default_shell() -> super::ShellProfile {
     for exe in ["pwsh.exe", "powershell.exe"] {
         if on_path(exe) {
-            return exe.into();
+            return super::ShellProfile {
+                name: exe.strip_suffix(".exe").unwrap_or(exe).to_string(),
+                path: exe.to_string(),
+            };
         }
     }
-    std::env::var("COMSPEC")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "cmd.exe".into())
+    if let Ok(comspec) = std::env::var("COMSPEC") {
+        if std::path::Path::new(&comspec).is_file() {
+            let name = std::path::Path::new(&comspec)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("cmd")
+                .to_string();
+            return super::ShellProfile { name, path: comspec };
+        }
+    }
+    super::ShellProfile {
+        name: "cmd".to_string(),
+        path: "cmd.exe".to_string(),
+    }
 }
 
 fn on_path(exe: &str) -> bool {
@@ -167,4 +180,102 @@ fn on_path(exe: &str) -> bool {
         return false;
     };
     std::env::split_paths(&path).any(|dir| dir.join(exe).is_file())
+}
+
+pub fn get_available_shells() -> Vec<super::ShellProfile> {
+    let mut shells = Vec::new();
+
+    if on_path("pwsh.exe") {
+        shells.push(super::ShellProfile {
+            name: "pwsh".to_string(),
+            path: "pwsh.exe".to_string(),
+        });
+    }
+    if on_path("powershell.exe") {
+        shells.push(super::ShellProfile {
+            name: "powershell".to_string(),
+            path: "powershell.exe".to_string(),
+        });
+    }
+    shells.push(super::ShellProfile {
+        name: "cmd".to_string(),
+        path: "cmd.exe".to_string(),
+    });
+
+    if std::path::Path::new(r"C:\Windows\System32\wsl.exe").is_file() {
+        shells.push(super::ShellProfile {
+            name: "wsl".to_string(),
+            path: "wsl.exe".to_string(),
+        });
+    }
+
+    // Less Common
+    if on_path("nu.exe") {
+        shells.push(super::ShellProfile {
+            name: "nushell".to_string(),
+            path: "nu.exe".to_string(),
+        });
+    }
+    if on_path("elvish.exe") {
+        shells.push(super::ShellProfile {
+            name: "elvish".to_string(),
+            path: "elvish.exe".to_string(),
+        });
+    }
+    if on_path("xonsh.exe") {
+        shells.push(super::ShellProfile {
+            name: "xonsh".to_string(),
+            path: "xonsh.exe".to_string(),
+        });
+    }
+    if on_path("sh.exe") {
+        shells.push(super::ShellProfile {
+            name: "busybox sh".to_string(),
+            path: "sh.exe".to_string(),
+        });
+    }
+
+    if let Ok(pf) = std::env::var("ProgramFiles") {
+        let git_bash = std::path::PathBuf::from(&pf).join("Git").join("bin").join("bash.exe");
+        if git_bash.is_file() {
+            shells.push(super::ShellProfile {
+                name: "git bash".to_string(),
+                path: git_bash.to_string_lossy().into_owned(),
+            });
+        }
+        
+        // Scoop shells but less Common
+        let scoop = std::path::PathBuf::from(&pf).join("scoop").join("shims");
+        if scoop.exists() {
+            if scoop.join("nu.exe").is_file() {
+                shells.push(super::ShellProfile {
+                    name: "nushell (scoop)".to_string(),
+                    path: scoop.join("nu.exe").to_string_lossy().into_owned(),
+                });
+            }
+            if scoop.join("elvish.exe").is_file() {
+                shells.push(super::ShellProfile {
+                    name: "elvish (scoop)".to_string(),
+                    path: scoop.join("elvish.exe").to_string_lossy().into_owned(),
+                });
+            }
+            if scoop.join("xonsh.exe").is_file() {
+                shells.push(super::ShellProfile {
+                    name: "xonsh (scoop)".to_string(),
+                    path: scoop.join("xonsh.exe").to_string_lossy().into_owned(),
+                });
+            }
+        }
+    }
+    if let Ok(pf) = std::env::var("ProgramFiles(x86)") {
+        let git_bash = std::path::PathBuf::from(&pf).join("Git").join("bin").join("bash.exe");
+        if git_bash.is_file() {
+            shells.push(super::ShellProfile {
+                name: "git bash (x86)".to_string(),
+                path: git_bash.to_string_lossy().into_owned(),
+            });
+        }
+    }
+
+    shells
 }
