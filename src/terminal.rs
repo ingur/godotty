@@ -35,6 +35,8 @@ const SCROLL_LINES: f64 = 3.0;
 const TITLE_POLL_SECS: f64 = 0.5;
 /// Parse pty output every frame, but re-record the grid at most this often.
 const REPAINT_MIN_SECS: f64 = 1.0 / 60.0;
+/// Codepoints drawn per cell; extra combining marks would just overlap.
+const GLYPHS_PER_CELL: usize = 8;
 /// Apply reflow and SIGWINCH once the size has stopped changing to avoid
 /// spam-drawing the prompt and messing up the scrollback during resize.
 const RESIZE_SETTLE_SECS: f64 = 0.1;
@@ -230,7 +232,8 @@ impl IControl for Terminal {
             // Hidden terminals keep draining but skip the re-record;
             // needs_paint stays sticky for the first visible frame.
             if visible && st.since_repaint >= REPAINT_MIN_SECS {
-                st.since_repaint = 0.0;
+                // Carry the overshoot so steady output holds the cap, not half it.
+                st.since_repaint = (st.since_repaint - REPAINT_MIN_SECS).min(REPAINT_MIN_SECS);
                 st.needs_paint = false;
                 match st.repaint(control_size) {
                     Ok(changed) => bg_changed = changed,
@@ -973,7 +976,7 @@ impl State {
         // clamped so the line cannot escape the cell.
         let underline_y = self.geo.underline.min(self.geo.cell_h - thick);
 
-        let mut chars = ['\0'; 8];
+        let mut graphemes: Vec<char> = Vec::new();
         let mut row_it = self.rows.update(&snapshot)?;
         let mut y = PAD;
         let mut row_i: u16 = 0;
@@ -1038,8 +1041,10 @@ impl State {
                     fg.a = 0.6;
                 }
 
-                let count = n.min(chars.len());
-                cell.graphemes_buf(&mut chars[..count])?;
+                // graphemes_buf writes the whole cluster; the buffer must hold all n.
+                graphemes.resize(n, '\0');
+                cell.graphemes_buf(&mut graphemes)?;
+                let count = n.min(GLYPHS_PER_CELL);
                 let style = Fonts::style_index(bold, italic);
                 let baseline = Vector2::new(x, y + self.geo.ascent);
                 let wide = || matches!(cell.raw_cell().and_then(|c| c.wide()), Ok(CellWide::Wide));
@@ -1047,9 +1052,11 @@ impl State {
                     .as_ref()
                     .is_some_and(|vp| vp.x == col && vp.y == row_i)
                 {
-                    cursor_cell = Some((chars, count, style, baseline, wide()));
+                    let mut glyphs = ['\0'; GLYPHS_PER_CELL];
+                    glyphs[..count].copy_from_slice(&graphemes[..count]);
+                    cursor_cell = Some((glyphs, count, style, baseline, wide()));
                 }
-                for ch in &chars[..count] {
+                for ch in &graphemes[..count] {
                     let cp = *ch as u32;
                     if sprite::draw(canvas, cell_rect, fg, self.geo.thick, cp) {
                         continue;
