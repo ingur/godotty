@@ -48,7 +48,7 @@
 
 ## Install
 
-Requires Godot 4.6+ on Linux, macOS, or Windows 10+.
+Requires Godot 4.7+ on Linux, macOS, or Windows 10+.
 
 - **Asset Library**: search for "Godotty" in the editor's AssetLib tab and
   install it.
