@@ -34,7 +34,7 @@ const PAD: f32 = 4.0;
 const SCROLL_LINES: f64 = 3.0;
 const TITLE_POLL_SECS: f64 = 0.5;
 /// Parse pty output every frame, but re-record the grid at most this often.
-const REPAINT_MIN_SECS: f64 = 0.025;
+const REPAINT_MIN_SECS: f64 = 1.0 / 60.0;
 /// Apply reflow and SIGWINCH once the size has stopped changing to avoid
 /// spam-drawing the prompt and messing up the scrollback during resize.
 const RESIZE_SETTLE_SECS: f64 = 0.1;
