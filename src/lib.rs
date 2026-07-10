@@ -3,6 +3,7 @@ mod input;
 mod plugin;
 mod pty;
 mod sprite;
+mod sync;
 mod terminal;
 mod theme;
 

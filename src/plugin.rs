@@ -12,6 +12,7 @@ use godot::global::HorizontalAlignment;
 use godot::prelude::*;
 use godot::register::info::PropertyHint;
 
+use crate::sync::SyncNode;
 use crate::terminal::Terminal;
 
 /// Editor chords the terminal leaves unconsumed, comma separated.
@@ -29,6 +30,7 @@ pub(crate) const TOGGLE_SHORTCUT: &str = "godotty/toggle_terminal_panel";
 const SHELL_SETTING: &str = "godotty/terminal/shell";
 pub(crate) const COLOR_SCHEME_SETTING: &str = "godotty/terminal/color_scheme";
 
+const SYNC_SETTING: &str = "godotty/terminal/sync_external_changes";
 const DOCK_SLOT_SETTING: &str = "godotty/terminal/default_dock_slot";
 const DOCK_SLOT_DEFAULT: i32 = 0; // DockSlot::LEFT_UL
 const DOCK_SLOT_NAMES: &str = "Far Left Top,Far Left Bottom,Left Top (Scene),\
@@ -285,6 +287,7 @@ struct TerminalPanel {
     panel: Option<Gd<TerminalTabs>>,
     main: Option<Gd<TerminalTabs>>,
     last_other: Option<Gd<Control>>,
+    sync: Option<Gd<SyncNode>>,
 }
 
 #[godot_api]
@@ -346,6 +349,37 @@ impl TerminalPanel {
         self.base_mut().remove_control_from_docks(&terminal);
         self.terminals.retain(|t| *t != terminal);
         terminal.free();
+    }
+
+    /// The editor saving a scene must not read back as an external change.
+    #[func]
+    fn on_scene_saved(&mut self, path: GString) {
+        if let Some(node) = self.sync.as_mut() {
+            node.bind_mut().note_scene_saved(&path.to_string());
+        }
+    }
+
+    #[func]
+    fn on_editor_settings_changed(&mut self) {
+        self.update_sync();
+    }
+
+    /// Start or stop external change syncing to match the editor setting.
+    /// The watcher lives in its own node so its reloads never run while this
+    /// plugin is bound.
+    fn update_sync(&mut self) {
+        let enabled = EditorInterface::singleton()
+            .get_editor_settings()
+            .map(|s| s.get_setting(SYNC_SETTING))
+            .and_then(|v| v.try_to::<bool>().ok())
+            .unwrap_or(true);
+        if enabled && self.sync.is_none() {
+            let node = SyncNode::new_alloc();
+            self.base_mut().add_child(&node);
+            self.sync = Some(node);
+        } else if !enabled && let Some(mut node) = self.sync.take() {
+            node.queue_free();
+        }
     }
 
     /// Remember where focus was outside the tab containers, so the toggle
@@ -480,6 +514,7 @@ impl IEditorPlugin for TerminalPanel {
                 PASSTHROUGH_SETTING,
                 &GString::from(PASSTHROUGH_DEFAULT).to_variant(),
             );
+            ensure_setting(&mut settings, SYNC_SETTING, &true.to_variant());
             if settings.get_shortcut(TOGGLE_SHORTCUT).is_none() {
                 let mut key = InputEventKey::new_gd();
                 key.set_keycode(godot::global::Key::QUOTELEFT);
@@ -514,9 +549,22 @@ impl IEditorPlugin for TerminalPanel {
                 ConnectFlags::DEFERRED,
             );
         }
+
+        let on_saved = self.to_gd().callable("on_scene_saved");
+        self.base_mut().connect("scene_saved", &on_saved);
+        if let Some(mut settings) = EditorInterface::singleton().get_editor_settings() {
+            settings.connect(
+                "settings_changed",
+                &self.to_gd().callable("on_editor_settings_changed"),
+            );
+        }
+        self.update_sync();
     }
 
     fn exit_tree(&mut self) {
+        if let Some(mut node) = self.sync.take() {
+            node.queue_free();
+        }
         if let Some(mut palette) = EditorInterface::singleton().get_command_palette() {
             palette.remove_command("godotty/new_dock");
             palette.remove_command("godotty/new_panel");

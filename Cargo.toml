@@ -21,8 +21,9 @@ strip = true
 lto = "thin"
 
 [dependencies]
-godot = "0.5"
+godot = { version = "0.5", features = ["api-4-7"] }
 libghostty-vt = "0.2"
+notify = "8"
 portable-pty = "0.9"
 
 [target.'cfg(unix)'.dependencies]

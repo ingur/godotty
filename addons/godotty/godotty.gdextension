@@ -1,7 +1,9 @@
 [configuration]
 entry_symbol = "gdext_rust_init"
-compatibility_minimum = 4.6
-reloadable = true
+compatibility_minimum = 4.7
+# Hot-reloading this extension crashes the editor (live terminal threads);
+# false makes every engine reload path skip it, so rebuilds apply on restart.
+reloadable = false
 
 [libraries]
 linux.debug.x86_64 = "res://addons/godotty/bin/libgodotty.linux.x86_64.so"
