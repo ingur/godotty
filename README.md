@@ -70,9 +70,9 @@ Requires Godot 4.7+ on Linux, macOS, or Windows 10+.
 
 ## Exports
 
-Godotty never ships in exported games.
+Godotty never ships in exported games by default.
 You can silence the harmless startup logs about the missing extension by adding `addons/godotty/*` to your export preset's exclude filter.
-To ship the `Terminal` node in your game instead, remove the `.editor` tags in `godotty.gdextension`.
+To ship the `Terminal` node in your game, remove the `.editor` tags in `godotty.gdextension`.
 
 ## Why?
 
