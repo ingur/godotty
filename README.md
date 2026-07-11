@@ -43,7 +43,7 @@
   your project root
 - Terminal colors are auto-generated from your editor theme
 - JetBrains Mono Nerd Fonts and emojis built in, no setup
-- A `Terminal` node for use inside your own tools
+- A `Terminal` node for use inside your own editor tools
 - Written in Rust as a self-contained GDExtension
 
 ## Install
@@ -67,6 +67,12 @@ Requires Godot 4.7+ on Linux, macOS, or Windows 10+.
 - Ctrl+` toggles the terminal panel in the bottom panel.
 - Drag docks anywhere, or float them as windows.
 - Settings live in Editor Settings under `godotty`.
+
+## Exports
+
+Godotty never ships in exported games.
+You can silence the harmless startup logs about the missing extension by adding `addons/godotty/*` to your export preset's exclude filter.
+To ship the `Terminal` node in your game instead, remove the `.editor` tags in `godotty.gdextension`.
 
 ## Why?
 
