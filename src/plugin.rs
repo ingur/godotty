@@ -40,7 +40,7 @@ Left Bottom (FileSystem),Right Top (Inspector),Right Bottom,Far Right Top,Far Ri
 /// Tabbed terminals for the bottom panel and the main screen: one row with
 /// the tab strip and a new-terminal button, terminals stacked below.
 #[derive(GodotClass)]
-#[class(tool, init, base = VBoxContainer)]
+#[class(tool, init, base = VBoxContainer, internal)]
 pub struct TerminalTabs {
     base: Base<VBoxContainer>,
     bar: Option<Gd<TabBar>>,
@@ -280,7 +280,7 @@ impl IVBoxContainer for TerminalTabs {
 /// Terminals in three editor locations: per-terminal docks (native drag,
 /// float, tabbing), a tabbed bottom panel, and a tabbed main screen.
 #[derive(GodotClass)]
-#[class(tool, init, base = EditorPlugin)]
+#[class(tool, init, base = EditorPlugin, internal)]
 struct TerminalPanel {
     base: Base<EditorPlugin>,
     terminals: Vec<Gd<Terminal>>,
@@ -631,7 +631,7 @@ impl IEditorPlugin for TerminalPanel {
 /// The library ships editor-only; also skip the addon files at export, or
 /// the packed .gdextension errors at every exported-game launch.
 #[derive(GodotClass)]
-#[class(tool, init, base = EditorExportPlugin)]
+#[class(tool, init, base = EditorExportPlugin, internal)]
 struct GodottyExportPlugin {
     base: Base<EditorExportPlugin>,
 }

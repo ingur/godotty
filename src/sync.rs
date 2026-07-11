@@ -49,7 +49,7 @@ const AUTORELOAD_SETTING: &str = "text_editor/behavior/files/auto_reload_scripts
 /// `get_plugin_name` during a main-screen refresh); running them here keeps
 /// `TerminalPanel` unbound so those callbacks never hit a re-entrant borrow.
 #[derive(GodotClass)]
-#[class(tool, base = Node)]
+#[class(tool, base = Node, internal)]
 pub struct SyncNode {
     base: Base<Node>,
     sync: Option<ExternalSync>,
