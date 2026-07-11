@@ -4,9 +4,10 @@ use godot::classes::notify::ContainerNotification;
 use godot::classes::object::ConnectFlags;
 use godot::classes::tab_bar::CloseButtonDisplayPolicy;
 use godot::classes::{
-    Button, CenterContainer, Control, EditorInterface, EditorPlugin, EditorSettings, HBoxContainer,
-    IEditorPlugin, IVBoxContainer, InputEvent, InputEventKey, Label, MarginContainer,
-    PanelContainer, Shortcut, TabBar, TabContainer, Texture2D, VBoxContainer,
+    Button, CenterContainer, Control, EditorExportPlugin, EditorInterface, EditorPlugin,
+    EditorSettings, HBoxContainer, IEditorExportPlugin, IEditorPlugin, IVBoxContainer, InputEvent,
+    InputEventKey, Label, MarginContainer, PanelContainer, Shortcut, TabBar, TabContainer,
+    Texture2D, VBoxContainer,
 };
 use godot::global::HorizontalAlignment;
 use godot::prelude::*;
@@ -288,6 +289,7 @@ struct TerminalPanel {
     main: Option<Gd<TerminalTabs>>,
     last_other: Option<Gd<Control>>,
     sync: Option<Gd<SyncNode>>,
+    export_plugin: Option<Gd<GodottyExportPlugin>>,
 }
 
 #[godot_api]
@@ -559,9 +561,16 @@ impl IEditorPlugin for TerminalPanel {
             );
         }
         self.update_sync();
+
+        let export_plugin = GodottyExportPlugin::new_gd();
+        self.base_mut().add_export_plugin(&export_plugin);
+        self.export_plugin = Some(export_plugin);
     }
 
     fn exit_tree(&mut self) {
+        if let Some(plugin) = self.export_plugin.take() {
+            self.base_mut().remove_export_plugin(&plugin);
+        }
         if let Some(mut node) = self.sync.take() {
             node.queue_free();
         }
@@ -617,6 +626,58 @@ impl IEditorPlugin for TerminalPanel {
             main.set_visible(visible);
         }
     }
+}
+
+/// The library ships editor-only; also skip the addon files at export, or
+/// the packed .gdextension errors at every exported-game launch.
+#[derive(GodotClass)]
+#[class(tool, init, base = EditorExportPlugin)]
+struct GodottyExportPlugin {
+    base: Base<EditorExportPlugin>,
+}
+
+#[godot_api]
+impl IEditorExportPlugin for GodottyExportPlugin {
+    fn export_file(&mut self, path: GString, _type: GString, _features: PackedStringArray) {
+        if path.to_string().starts_with("res://addons/godotty/") && editor_only_libraries() {
+            self.base_mut().skip();
+        }
+    }
+
+    // "!" sorts before the engine's "GDExtension" plugin, so skip() wins
+    // before its missing-library warning.
+    fn get_name(&self) -> GString {
+        "!godotty".into()
+    }
+
+    // Defaultless trait methods; never called while begin_customize_* is false.
+    fn customize_resource(&mut self, _res: Gd<Resource>, _path: GString) -> Option<Gd<Resource>> {
+        None
+    }
+
+    fn customize_scene(&mut self, _scene: Gd<Node>, _path: GString) -> Option<Gd<Node>> {
+        None
+    }
+
+    fn get_customization_configuration_hash(&self) -> u64 {
+        0
+    }
+}
+
+/// True while every [libraries] entry is editor-tagged; removing the editor
+/// tag opts the addon back into normal game exports.
+fn editor_only_libraries() -> bool {
+    let mut config = godot::classes::ConfigFile::new_gd();
+    if config.load("res://addons/godotty/godotty.gdextension") != godot::global::Error::OK
+        || !config.has_section("libraries")
+    {
+        return true;
+    }
+    config
+        .get_section_keys("libraries")
+        .as_slice()
+        .iter()
+        .all(|key| key.to_string().split('.').any(|tag| tag == "editor"))
 }
 
 /// A Terminal with its title_changed/exited signals wired to the owner's
