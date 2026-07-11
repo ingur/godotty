@@ -6,9 +6,6 @@ compatibility_minimum = 4.7
 reloadable = false
 
 [libraries]
-linux.debug.x86_64 = "res://addons/godotty/bin/libgodotty.linux.x86_64.so"
-linux.release.x86_64 = "res://addons/godotty/bin/libgodotty.linux.x86_64.so"
-macos.debug = "res://addons/godotty/bin/libgodotty.macos.dylib"
-macos.release = "res://addons/godotty/bin/libgodotty.macos.dylib"
-windows.debug.x86_64 = "res://addons/godotty/bin/libgodotty.windows.x86_64.dll"
-windows.release.x86_64 = "res://addons/godotty/bin/libgodotty.windows.x86_64.dll"
+linux.editor.x86_64 = "res://addons/godotty/bin/libgodotty.linux.x86_64.so"
+macos.editor = "res://addons/godotty/bin/libgodotty.macos.dylib"
+windows.editor.x86_64 = "res://addons/godotty/bin/libgodotty.windows.x86_64.dll"
