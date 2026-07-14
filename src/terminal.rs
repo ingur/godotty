@@ -313,7 +313,7 @@ impl IControl for Terminal {
         }
     }
 
-    /// Background only; the grid lives on a retained canvas item.
+    /// Background only; the grid lives on retained canvas items.
     fn draw(&mut self) {
         let size = self.base().get_size();
         let Some(bg) = self.state.as_ref().map(|st| st.bg) else {
@@ -667,7 +667,8 @@ struct State {
     win_focused: bool,
     title: String,
     title_timer: f64,
-    canvas: Rid,
+    canvas_bg: Rid,
+    canvas_fg: Rid,
     bg: Color,
     needs_paint: bool,
     since_repaint: f64,
@@ -677,7 +678,9 @@ struct State {
 
 impl Drop for State {
     fn drop(&mut self) {
-        RenderingServer::singleton().free_rid(self.canvas);
+        let mut rs = RenderingServer::singleton();
+        rs.free_rid(self.canvas_fg);
+        rs.free_rid(self.canvas_bg);
     }
 }
 
@@ -791,14 +794,27 @@ impl State {
         vt.on_bell(move |_t| ev.set(true))
             .map_err(|e| format!("effect: {e}"))?;
 
+        let input = Input::new().map_err(|e| format!("input: {e}"))?;
+        let render_state = RenderState::new().map_err(|e| format!("render: {e}"))?;
+        let rows = RowIterator::new().map_err(|e| format!("render: {e}"))?;
+        let cells = CellIterator::new().map_err(|e| format!("render: {e}"))?;
+
+        // A parent's own commands draw before its children, so backgrounds
+        // sit below glyph ink, which may overflow its cell.
+        let mut rs = RenderingServer::singleton();
+        let canvas_bg = rs.canvas_item_create();
+        rs.canvas_item_set_parent(canvas_bg, parent_canvas);
+        let canvas_fg = rs.canvas_item_create();
+        rs.canvas_item_set_parent(canvas_fg, canvas_bg);
+
         Ok(Self {
             vt,
             pty,
             writer,
-            input: Input::new().map_err(|e| format!("input: {e}"))?,
-            render_state: RenderState::new().map_err(|e| format!("render: {e}"))?,
-            rows: RowIterator::new().map_err(|e| format!("render: {e}"))?,
-            cells: CellIterator::new().map_err(|e| format!("render: {e}"))?,
+            input,
+            render_state,
+            rows,
+            cells,
             fonts,
             font_size,
             geo,
@@ -813,12 +829,8 @@ impl State {
             win_focused: true,
             title: String::new(),
             title_timer: TITLE_POLL_SECS,
-            canvas: {
-                let mut rs = RenderingServer::singleton();
-                let canvas = rs.canvas_item_create();
-                rs.canvas_item_set_parent(canvas, parent_canvas);
-                canvas
-            },
+            canvas_bg,
+            canvas_fg,
             bg: color(theme.bg),
             theme,
             scheme,
@@ -949,9 +961,10 @@ impl State {
 
     /// Re-record the grid; returns whether the background color changed.
     fn repaint(&mut self, size: Vector2) -> libghostty_vt::error::Result<bool> {
-        let canvas = self.canvas;
+        let (canvas_bg, canvas_fg) = (self.canvas_bg, self.canvas_fg);
         let mut rs = RenderingServer::singleton();
-        rs.canvas_item_clear(canvas);
+        rs.canvas_item_clear(canvas_bg);
+        rs.canvas_item_clear(canvas_fg);
         let snapshot = self.render_state.update(&self.vt)?;
         let colors = snapshot.colors()?;
 
@@ -1000,7 +1013,7 @@ impl State {
                         cell.bg_color()?
                     };
                     if let Some(bg) = bg {
-                        rs.canvas_item_add_rect(canvas, cell_rect, color(bg));
+                        rs.canvas_item_add_rect(canvas_bg, cell_rect, color(bg));
                     }
                     x += self.geo.cell_w;
                     col += 1;
@@ -1033,7 +1046,7 @@ impl State {
                 }
 
                 if let Some(bg) = bg {
-                    rs.canvas_item_add_rect(canvas, cell_rect, color(bg));
+                    rs.canvas_item_add_rect(canvas_bg, cell_rect, color(bg));
                 }
 
                 let mut fg = color(fg);
@@ -1058,11 +1071,11 @@ impl State {
                 }
                 for ch in &graphemes[..count] {
                     let cp = *ch as u32;
-                    if sprite::draw(canvas, cell_rect, fg, self.geo.thick, cp) {
+                    if sprite::draw(canvas_fg, cell_rect, fg, self.geo.thick, cp) {
                         continue;
                     }
                     if let Some(font) = self.fonts.resolve(cp, style, wide) {
-                        font.draw_char_ex(canvas, baseline, cp, self.font_size)
+                        font.draw_char_ex(canvas_fg, baseline, cp, self.font_size)
                             .modulate(fg)
                             .done();
                     }
@@ -1073,7 +1086,7 @@ impl State {
                         Vector2::new(x, y + underline_y),
                         Vector2::new(self.geo.cell_w, thick),
                     );
-                    rs.canvas_item_add_rect(canvas, line, fg);
+                    rs.canvas_item_add_rect(canvas_fg, line, fg);
                 }
 
                 x += self.geo.cell_w;
@@ -1104,7 +1117,7 @@ impl State {
             match cursor_style {
                 // Centered on the cell's left edge, between characters.
                 CursorVisualStyle::Bar => rs.canvas_item_add_rect(
-                    canvas,
+                    canvas_fg,
                     Rect2::new(
                         Vector2::new(origin.x - ((thick + 1.0) / 2.0).floor(), origin.y),
                         Vector2::new(thick, size.y),
@@ -1112,7 +1125,7 @@ impl State {
                     c,
                 ),
                 CursorVisualStyle::Underline => rs.canvas_item_add_rect(
-                    canvas,
+                    canvas_fg,
                     Rect2::new(
                         Vector2::new(origin.x, origin.y + underline_y),
                         Vector2::new(size.x, thick),
@@ -1131,13 +1144,13 @@ impl State {
                             Vector2::new(origin.x + x0, origin.y + y0),
                             Vector2::new(x1 - x0, y1 - y0),
                         );
-                        rs.canvas_item_add_rect(canvas, frame, c);
+                        rs.canvas_item_add_rect(canvas_fg, frame, c);
                     }
                 }
                 // Block, and any future style, as the filled block; only
                 // this style repaints the glyph underneath.
                 _ => {
-                    rs.canvas_item_add_rect(canvas, Rect2::new(origin, size), c);
+                    rs.canvas_item_add_rect(canvas_fg, Rect2::new(origin, size), c);
                     if let Some((chars, count, style, baseline, wide)) = cursor_cell {
                         // Godot leaves color glyphs untinted, matching ghostty.
                         let text = color(colors.background);
@@ -1147,11 +1160,11 @@ impl State {
                         );
                         for ch in &chars[..count] {
                             let cp = *ch as u32;
-                            if sprite::draw(canvas, cell, text, self.geo.thick, cp) {
+                            if sprite::draw(canvas_fg, cell, text, self.geo.thick, cp) {
                                 continue;
                             }
                             if let Some(font) = self.fonts.resolve(cp, style, || wide) {
-                                font.draw_char_ex(canvas, baseline, cp, self.font_size)
+                                font.draw_char_ex(canvas_fg, baseline, cp, self.font_size)
                                     .modulate(text)
                                     .done();
                             }
@@ -1163,7 +1176,7 @@ impl State {
 
         if self.exited {
             rs.canvas_item_add_rect(
-                canvas,
+                canvas_fg,
                 Rect2::new(Vector2::ZERO, size),
                 Color::from_rgba(0.0, 0.0, 0.0, 0.55),
             );
@@ -1176,7 +1189,7 @@ impl State {
                 .x;
             primary
                 .draw_string_ex(
-                    canvas,
+                    canvas_fg,
                     Vector2::new((size.x - width) / 2.0, size.y / 2.0),
                     msg,
                 )
