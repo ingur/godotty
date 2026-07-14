@@ -27,6 +27,7 @@ use libghostty_vt::{Error as VtError, Terminal as Vt, TerminalOptions, mouse, pa
 use crate::font::Fonts;
 use crate::input::{Input, MouseGeometry, event_mods};
 use crate::pty::{Drained, Pty, Writer};
+use crate::run::{Run, RunCache};
 use crate::sprite;
 use crate::theme::{self, Theme};
 
@@ -57,6 +58,8 @@ pub struct Terminal {
     base: Base<Control>,
     #[export]
     font_size: i32,
+    #[export]
+    ligatures: bool,
     #[export]
     scrollback: u32,
     /// Command to run; empty means $SHELL.
@@ -93,6 +96,7 @@ impl Terminal {
     #[func]
     fn on_editor_settings_changed(&mut self) {
         self.refresh_theme();
+        self.refresh_ligatures();
     }
 
     fn refresh_theme(&mut self) {
@@ -111,6 +115,19 @@ impl Terminal {
             godot_error!("[godotty] theme change failed: {e}");
         }
     }
+
+    fn refresh_ligatures(&mut self) {
+        if !self.run_in_editor {
+            return;
+        }
+        let pref = self.ligatures_pref();
+        if let Some(st) = self.state.as_mut()
+            && st.ligatures != pref
+        {
+            st.ligatures = pref;
+            st.needs_paint = true;
+        }
+    }
 }
 
 #[godot_api]
@@ -119,6 +136,7 @@ impl IControl for Terminal {
         Self {
             base,
             font_size: 14,
+            ligatures: true,
             scrollback: 1000,
             shell: GString::new(),
             working_directory: GString::new(),
@@ -144,6 +162,7 @@ impl IControl for Terminal {
         };
         let spawn = Spawn {
             font_size: ((self.font_size as f32) * scale).round().max(1.0) as i32,
+            ligatures: self.ligatures_pref(),
             scrollback: self.scrollback.min(MAX_SCROLLBACK),
             shell: self.shell.to_string(),
             cwd: resolve_cwd(&self.working_directory.to_string()),
@@ -336,6 +355,17 @@ impl Terminal {
             .and_then(|v| v.try_to::<i64>().ok())
             .map(|v| v as i32)
             .unwrap_or(theme::SCHEME_AUTO)
+    }
+
+    fn ligatures_pref(&self) -> bool {
+        if !self.run_in_editor {
+            return self.ligatures;
+        }
+        EditorInterface::singleton()
+            .get_editor_settings()
+            .map(|s| s.get_setting(crate::plugin::LIGATURES_SETTING))
+            .and_then(|v| v.try_to::<bool>().ok())
+            .unwrap_or(true)
     }
 
     fn handle_key(&mut self, key: &Gd<InputEventKey>) {
@@ -616,6 +646,7 @@ struct SharedGeo {
 /// Node configuration resolved at spawn time.
 struct Spawn {
     font_size: i32,
+    ligatures: bool,
     scrollback: u32,
     shell: String,
     cwd: PathBuf,
@@ -653,6 +684,8 @@ struct State {
     cells: CellIterator<'static>,
     fonts: Rc<Fonts>,
     font_size: i32,
+    ligatures: bool,
+    runs: RunCache,
     geo: Geometry,
     shared_geo: Rc<Cell<SharedGeo>>,
     bell: Rc<Cell<bool>>,
@@ -817,6 +850,8 @@ impl State {
             cells,
             fonts,
             font_size,
+            ligatures: spawn.ligatures,
+            runs: RunCache::new(),
             geo,
             shared_geo,
             bell,
@@ -990,6 +1025,22 @@ impl State {
         let underline_y = self.geo.underline.min(self.geo.cell_h - thick);
 
         let mut graphemes: Vec<char> = Vec::new();
+        let mut run: Option<Run> = None;
+        let runs = &mut self.runs;
+        let fonts = &self.fonts;
+        let (cell_w, ascent, font_size) = (self.geo.cell_w, self.geo.ascent, self.font_size);
+        let mut flush = |run: &mut Option<Run>, y: f32| {
+            if let Some(r) = run.take() {
+                runs.draw(
+                    canvas_fg,
+                    fonts.style_font(r.style),
+                    r,
+                    y + ascent,
+                    cell_w,
+                    font_size,
+                );
+            }
+        };
         let mut row_it = self.rows.update(&snapshot)?;
         let mut y = PAD;
         let mut row_i: u16 = 0;
@@ -1007,6 +1058,7 @@ impl State {
                 );
 
                 if n == 0 {
+                    flush(&mut run, y);
                     let bg = if selected {
                         Some(colors.foreground)
                     } else {
@@ -1061,23 +1113,51 @@ impl State {
                 let style = Fonts::style_index(bold, italic);
                 let baseline = Vector2::new(x, y + self.geo.ascent);
                 let wide = || matches!(cell.raw_cell().and_then(|c| c.wide()), Ok(CellWide::Wide));
-                if cursor_vp
+                let at_cursor = cursor_vp
                     .as_ref()
-                    .is_some_and(|vp| vp.x == col && vp.y == row_i)
+                    .is_some_and(|vp| vp.x == col && vp.y == row_i);
+
+                // Runs hold single-codepoint ASCII cells of one style and
+                // color; the cursor cell stays out so a ligature under the
+                // cursor splits into plain characters, like ghostty.
+                let run_cell = self.ligatures
+                    && n == 1
+                    && (0x20..=0x7e).contains(&(graphemes[0] as u32))
+                    && !at_cursor;
+                if run
+                    .as_ref()
+                    .is_some_and(|r| !run_cell || r.style != style || r.fg != fg)
                 {
-                    let mut glyphs = ['\0'; GLYPHS_PER_CELL];
-                    glyphs[..count].copy_from_slice(&graphemes[..count]);
-                    cursor_cell = Some((glyphs, count, style, baseline, wide()));
+                    flush(&mut run, y);
                 }
-                for ch in &graphemes[..count] {
-                    let cp = *ch as u32;
-                    if sprite::draw(canvas_fg, cell_rect, fg, self.geo.thick, cp) {
-                        continue;
+                if run_cell {
+                    match run.as_mut() {
+                        Some(r) => r.text.push(graphemes[0]),
+                        None => {
+                            run = Some(Run {
+                                text: graphemes[0].to_string(),
+                                style,
+                                fg,
+                                x,
+                            })
+                        }
                     }
-                    if let Some(font) = self.fonts.resolve(cp, style, wide) {
-                        font.draw_char_ex(canvas_fg, baseline, cp, self.font_size)
-                            .modulate(fg)
-                            .done();
+                } else {
+                    if at_cursor {
+                        let mut glyphs = ['\0'; GLYPHS_PER_CELL];
+                        glyphs[..count].copy_from_slice(&graphemes[..count]);
+                        cursor_cell = Some((glyphs, count, style, baseline, wide()));
+                    }
+                    for ch in &graphemes[..count] {
+                        let cp = *ch as u32;
+                        if sprite::draw(canvas_fg, cell_rect, fg, self.geo.thick, cp) {
+                            continue;
+                        }
+                        if let Some(font) = self.fonts.resolve(cp, style, wide) {
+                            font.draw_char_ex(canvas_fg, baseline, cp, self.font_size)
+                                .modulate(fg)
+                                .done();
+                        }
                     }
                 }
 
@@ -1092,9 +1172,11 @@ impl State {
                 x += self.geo.cell_w;
                 col += 1;
             }
+            flush(&mut run, y);
             y += self.geo.cell_h;
             row_i += 1;
         }
+        self.runs.end_frame();
 
         if let Some(vp) = cursor_vp {
             let c = color(colors.cursor.unwrap_or(colors.foreground));

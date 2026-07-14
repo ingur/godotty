@@ -2,6 +2,7 @@ mod font;
 mod input;
 mod plugin;
 mod pty;
+mod run;
 mod sprite;
 mod sync;
 mod terminal;

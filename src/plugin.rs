@@ -30,6 +30,7 @@ pub(crate) const TOGGLE_SHORTCUT: &str = "godotty/toggle_terminal_panel";
 
 const SHELL_SETTING: &str = "godotty/terminal/shell";
 pub(crate) const COLOR_SCHEME_SETTING: &str = "godotty/terminal/color_scheme";
+pub(crate) const LIGATURES_SETTING: &str = "godotty/terminal/ligatures";
 
 const SYNC_SETTING: &str = "godotty/terminal/sync_external_changes";
 const DOCK_SLOT_SETTING: &str = "godotty/terminal/default_dock_slot";
@@ -499,6 +500,7 @@ impl IEditorPlugin for TerminalPanel {
                 PropertyHint::ENUM,
                 "Auto,Dark,Light",
             );
+            ensure_setting(&mut settings, LIGATURES_SETTING, &true.to_variant());
             ensure_setting(
                 &mut settings,
                 DOCK_SLOT_SETTING,

@@ -106,6 +106,10 @@ impl Fonts {
         &self.fonts[0]
     }
 
+    pub fn style_font(&self, style: u8) -> &Gd<Font> {
+        &self.fonts[style as usize]
+    }
+
     pub fn style_index(bold: bool, italic: bool) -> u8 {
         match (bold, italic) {
             (false, false) => 0,
