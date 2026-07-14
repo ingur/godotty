@@ -42,7 +42,7 @@
 - Tab titles follow the running program, shells open as login shells in
   your project root
 - Terminal colors are auto-generated from your editor theme
-- JetBrains Mono Nerd Fonts and emojis built in, no setup
+- JetBrains Mono Nerd Fonts, ligatures, and emojis built in, no setup
 - A `Terminal` node for use inside your own editor tools
 - Written in Rust as a self-contained GDExtension
 
