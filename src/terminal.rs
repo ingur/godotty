@@ -22,7 +22,7 @@ use libghostty_vt::terminal::{
     ColorScheme, ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType, Mode,
     PrimaryDeviceAttributes, ScrollViewport, SecondaryDeviceAttributes, SizeReportSize,
 };
-use libghostty_vt::{Error as VtError, Terminal as Vt, TerminalOptions, mouse, paste};
+use libghostty_vt::{Error as VtError, Terminal as Vt, TerminalOptions, focus, mouse, paste};
 
 use crate::font::Fonts;
 use crate::input::{Input, MouseGeometry, event_mods};
@@ -320,6 +320,7 @@ impl IControl for Terminal {
         {
             st.focused = what == ControlNotification::FOCUS_ENTER;
             st.needs_paint = true;
+            st.report_focus();
         }
         if (what == ControlNotification::WM_WINDOW_FOCUS_IN
             || what == ControlNotification::WM_WINDOW_FOCUS_OUT)
@@ -327,6 +328,7 @@ impl IControl for Terminal {
         {
             st.win_focused = what == ControlNotification::WM_WINDOW_FOCUS_IN;
             st.needs_paint = true;
+            st.report_focus();
         }
         if what == ControlNotification::THEME_CHANGED {
             self.refresh_theme();
@@ -699,6 +701,7 @@ struct State {
     autoscroll_accum: f64,
     focused: bool,
     win_focused: bool,
+    reported_focus: bool,
     title: String,
     title_timer: f64,
     canvas_bg: Rid,
@@ -863,6 +866,7 @@ impl State {
             autoscroll_accum: 0.0,
             focused: false,
             win_focused: true,
+            reported_focus: false,
             title: String::new(),
             title_timer: TITLE_POLL_SECS,
             canvas_bg,
@@ -898,6 +902,29 @@ impl State {
         self.theme = theme;
         self.needs_paint = true;
         Ok(())
+    }
+
+    /// One CSI I/O per transition of the combined focus, mode 1004 only.
+    /// Apps that enable the mode get no initial state, the crate has no
+    /// mode change hook.
+    fn report_focus(&mut self) {
+        let combined = self.focused && self.win_focused;
+        if combined == self.reported_focus {
+            return;
+        }
+        self.reported_focus = combined;
+        if self.exited || !self.vt.mode(Mode::FOCUS_EVENT).unwrap_or(false) {
+            return;
+        }
+        let mut buf = [0u8; 8];
+        let event = if combined {
+            focus::Event::Gained
+        } else {
+            focus::Event::Lost
+        };
+        if let Ok(n) = event.encode(&mut buf) {
+            self.writer.write(&buf[..n]);
+        }
     }
 
     /// Polled title: explicit OSC title wins, else foreground process name.
