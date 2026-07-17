@@ -26,6 +26,7 @@ use libghostty_vt::{Error as VtError, Terminal as Vt, TerminalOptions, focus, mo
 
 use crate::font::Fonts;
 use crate::input::{Input, MouseGeometry, event_mods};
+use crate::plugin;
 use crate::pty::{Drained, Pty, Writer};
 use crate::run::{Run, RunCache};
 use crate::sprite;
@@ -57,7 +58,7 @@ const PAN_TO_PIXELS: f64 = if cfg!(target_os = "macos") {
 pub struct Terminal {
     base: Base<Control>,
     #[export]
-    font_size: i32,
+    pub(crate) font_size: i32,
     #[export]
     ligatures: bool,
     #[export]
@@ -164,7 +165,8 @@ impl IControl for Terminal {
             1.0
         };
         let spawn = Spawn {
-            font_size: ((self.font_size as f32) * scale).round().max(1.0) as i32,
+            font_size: self.font_size.clamp(6, 72),
+            scale,
             ligatures: self.ligatures_pref(),
             scrollback: self.scrollback.min(MAX_SCROLLBACK),
             shell: self.shell.to_string(),
@@ -362,7 +364,7 @@ impl Terminal {
         }
         EditorInterface::singleton()
             .get_editor_settings()
-            .map(|s| s.get_setting(crate::plugin::COLOR_SCHEME_SETTING))
+            .map(|s| s.get_setting(plugin::COLOR_SCHEME_SETTING))
             .and_then(|v| v.try_to::<i64>().ok())
             .map(|v| v as i32)
             .unwrap_or(theme::SCHEME_AUTO)
@@ -374,7 +376,7 @@ impl Terminal {
         }
         EditorInterface::singleton()
             .get_editor_settings()
-            .map(|s| s.get_setting(crate::plugin::LIGATURES_SETTING))
+            .map(|s| s.get_setting(plugin::LIGATURES_SETTING))
             .and_then(|v| v.try_to::<bool>().ok())
             .unwrap_or(true)
     }
@@ -400,6 +402,27 @@ impl Terminal {
                 }
                 self.base_mut().accept_event();
                 return;
+            }
+
+            // Per-terminal zoom through the rebindable editor shortcuts.
+            if self.in_editor() {
+                let ev = key.clone().upcast::<InputEvent>();
+                let delta = if plugin::shortcut_matches(plugin::INCREASE_FONT_SHORTCUT, &ev) {
+                    Some(1)
+                } else if plugin::shortcut_matches(plugin::DECREASE_FONT_SHORTCUT, &ev) {
+                    Some(-1)
+                } else if plugin::shortcut_matches(plugin::RESET_FONT_SHORTCUT, &ev) {
+                    Some(0)
+                } else {
+                    None
+                };
+                if let Some(delta) = delta {
+                    if let Some(st) = self.state.as_mut() {
+                        st.adjust_font_pt(delta);
+                    }
+                    self.base_mut().accept_event();
+                    return;
+                }
             }
 
             // Scrollback keys. Primary screen only, so TUIs keep them.
@@ -669,6 +692,39 @@ impl Geometry {
     }
 }
 
+/// Cell geometry from the font metrics at `font_size`, before fit().
+/// Integral metrics; the mouse encoder and gestures take integer px.
+fn measure(fonts: &Fonts, font_size: i32) -> Result<Geometry, String> {
+    let primary = fonts.primary();
+    let cell_w = primary.get_char_size('M' as u32, font_size).x.ceil();
+    let cell_h = primary.get_height_ex().font_size(font_size).done().ceil();
+    let ascent = primary.get_ascent_ex().font_size(font_size).done().round();
+    let thick = primary
+        .get_underline_thickness_ex()
+        .font_size(font_size)
+        .done()
+        .round()
+        .max(1.0);
+    let underline = primary
+        .get_underline_position_ex()
+        .font_size(font_size)
+        .done();
+    if cell_w <= 0.0 || cell_h <= 0.0 {
+        return Err("font produced zero cell size".into());
+    }
+    Ok(Geometry {
+        cell_w,
+        cell_h,
+        ascent,
+        thick,
+        underline: (ascent + underline).round(),
+        cols: 0,
+        rows: 0,
+        width: 0.0,
+        height: 0.0,
+    })
+}
+
 #[derive(Clone, Copy)]
 struct SharedGeo {
     cols: u16,
@@ -677,9 +733,11 @@ struct SharedGeo {
     cell_h: u32,
 }
 
-/// Node configuration resolved at spawn time.
+/// Node configuration resolved at spawn time. `font_size` is the base pt,
+/// `scale` the editor display scale applied on top.
 struct Spawn {
     font_size: i32,
+    scale: f32,
     ligatures: bool,
     scrollback: u32,
     shell: String,
@@ -718,6 +776,9 @@ struct State {
     cells: CellIterator<'static>,
     fonts: Rc<Fonts>,
     font_size: i32,
+    base_pt: i32,
+    spawn_pt: i32,
+    scale: f32,
     ligatures: bool,
     runs: RunCache,
     geo: Geometry,
@@ -755,45 +816,15 @@ impl Drop for State {
 impl State {
     fn new(spawn: &Spawn, theme: Theme, size: Vector2, parent_canvas: Rid) -> Result<Self, String> {
         let fonts = Fonts::shared()?;
-        let font_size = spawn.font_size;
-
-        // Integral metrics; the mouse encoder and gestures take integer px.
-        let primary = fonts.primary();
-        let cell_w = primary.get_char_size('M' as u32, font_size).x.ceil();
-        let cell_h = primary.get_height_ex().font_size(font_size).done().ceil();
-        let ascent = primary.get_ascent_ex().font_size(font_size).done().round();
-        let thick = primary
-            .get_underline_thickness_ex()
-            .font_size(font_size)
-            .done()
-            .round()
-            .max(1.0);
-        let underline = primary
-            .get_underline_position_ex()
-            .font_size(font_size)
-            .done();
-        if cell_w <= 0.0 || cell_h <= 0.0 {
-            return Err("font produced zero cell size".into());
-        }
-
-        let mut geo = Geometry {
-            cell_w,
-            cell_h,
-            ascent,
-            thick,
-            underline: (ascent + underline).round(),
-            cols: 0,
-            rows: 0,
-            width: 0.0,
-            height: 0.0,
-        };
+        let font_size = ((spawn.font_size as f32) * spawn.scale).round().max(1.0) as i32;
+        let mut geo = measure(&fonts, font_size)?;
         geo.fit(size);
 
         let pty = Pty::spawn(crate::pty::Options {
             cols: geo.cols,
             rows: geo.rows,
-            cell_w: cell_w as u16,
-            cell_h: cell_h as u16,
+            cell_w: geo.cell_w as u16,
+            cell_h: geo.cell_h as u16,
             shell: (!spawn.shell.is_empty()).then_some(spawn.shell.as_str()),
             cwd: &spawn.cwd,
             login: spawn.login,
@@ -810,7 +841,7 @@ impl State {
             max_scrollback: spawn.scrollback as usize,
         })
         .map_err(|e| format!("terminal: {e}"))?;
-        vt.resize(geo.cols, geo.rows, cell_w as u32, cell_h as u32)
+        vt.resize(geo.cols, geo.rows, geo.cell_w as u32, geo.cell_h as u32)
             .map_err(|e| format!("terminal resize: {e}"))?;
 
         vt.set_default_bg_color(Some(theme.bg))
@@ -885,6 +916,9 @@ impl State {
             cells,
             fonts,
             font_size,
+            base_pt: spawn.font_size,
+            spawn_pt: spawn.font_size,
+            scale: spawn.scale,
             ligatures: spawn.ligatures,
             runs: RunCache::new(),
             geo,
@@ -933,6 +967,42 @@ impl State {
         self.theme = theme;
         self.needs_paint = true;
         Ok(())
+    }
+
+    /// Transient per-terminal size, 0 resets to the spawn size.
+    fn adjust_font_pt(&mut self, delta: i32) {
+        let pt = if delta == 0 {
+            self.spawn_pt
+        } else {
+            (self.base_pt + delta).clamp(6, 72)
+        };
+        if pt == self.base_pt {
+            return;
+        }
+        let effective = ((pt as f32) * self.scale).round().max(1.0) as i32;
+        if effective != self.font_size {
+            let mut geo = match measure(&self.fonts, effective) {
+                Ok(geo) => geo,
+                Err(e) => {
+                    godot_error!("[godotty] font size change failed: {e}");
+                    return;
+                }
+            };
+            geo.fit(Vector2::new(self.geo.width, self.geo.height));
+            self.geo = geo;
+            self.font_size = effective;
+            if let Err(e) = self.vt.resize(geo.cols, geo.rows, geo.cell_w as u32, geo.cell_h as u32)
+            {
+                godot_error!("[godotty] terminal resize failed: {e}");
+            }
+            self.pty
+                .resize(geo.cols, geo.rows, geo.cell_w as u16, geo.cell_h as u16);
+            self.shared_geo.set(geo.shared());
+            // Cached runs were shaped at the old size.
+            self.runs = RunCache::new();
+            self.needs_paint = true;
+        }
+        self.base_pt = pt;
     }
 
     /// One CSI I/O per transition of the combined focus, mode 1004 only.
@@ -1412,11 +1482,11 @@ fn is_editor_passthrough(key: &Gd<InputEventKey>) -> bool {
         return false;
     };
     // The toggle shortcut is always passed through, no separate listing.
-    if crate::plugin::toggle_shortcut_matches(&key.clone().upcast::<InputEvent>()) {
+    if plugin::shortcut_matches(plugin::TOGGLE_SHORTCUT, &key.clone().upcast::<InputEvent>()) {
         return true;
     }
     let chords = settings
-        .get_setting(crate::plugin::PASSTHROUGH_SETTING)
+        .get_setting(plugin::PASSTHROUGH_SETTING)
         .try_to::<GString>()
         .unwrap_or_default();
     let combo = key.get_keycode_with_modifiers();

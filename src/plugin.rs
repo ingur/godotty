@@ -9,7 +9,7 @@ use godot::classes::{
     InputEventKey, Label, MarginContainer, PanelContainer, Shortcut, TabBar, TabContainer,
     Texture2D, VBoxContainer,
 };
-use godot::global::HorizontalAlignment;
+use godot::global::{HorizontalAlignment, Key as GKey};
 use godot::prelude::*;
 use godot::register::info::PropertyHint;
 
@@ -28,7 +28,13 @@ const PASSTHROUGH_DEFAULT: &str = "Ctrl+Shift+P";
 /// return focus to where you were.
 pub(crate) const TOGGLE_SHORTCUT: &str = "godotty/toggle_terminal_panel";
 
+/// Per-terminal zoom, transient like ghostty's.
+pub(crate) const INCREASE_FONT_SHORTCUT: &str = "godotty/increase_font_size";
+pub(crate) const DECREASE_FONT_SHORTCUT: &str = "godotty/decrease_font_size";
+pub(crate) const RESET_FONT_SHORTCUT: &str = "godotty/reset_font_size";
+
 const SHELL_SETTING: &str = "godotty/terminal/shell";
+const FONT_SIZE_SETTING: &str = "godotty/terminal/font_size";
 pub(crate) const COLOR_SCHEME_SETTING: &str = "godotty/terminal/color_scheme";
 pub(crate) const LIGATURES_SETTING: &str = "godotty/terminal/ligatures";
 
@@ -492,6 +498,14 @@ impl IEditorPlugin for TerminalPanel {
                 PropertyHint::PLACEHOLDER_TEXT,
                 "program, no arguments; empty = auto",
             );
+            ensure_setting(&mut settings, FONT_SIZE_SETTING, &14i64.to_variant());
+            add_hint(
+                &mut settings,
+                FONT_SIZE_SETTING,
+                VariantType::INT,
+                PropertyHint::RANGE,
+                "6,32,1",
+            );
             ensure_setting(&mut settings, COLOR_SCHEME_SETTING, &0i64.to_variant());
             add_hint(
                 &mut settings,
@@ -519,14 +533,12 @@ impl IEditorPlugin for TerminalPanel {
                 &GString::from(PASSTHROUGH_DEFAULT).to_variant(),
             );
             ensure_setting(&mut settings, SYNC_SETTING, &true.to_variant());
-            if settings.get_shortcut(TOGGLE_SHORTCUT).is_none() {
-                let mut key = InputEventKey::new_gd();
-                key.set_keycode(godot::global::Key::QUOTELEFT);
-                key.set_ctrl_pressed(true);
-                let mut shortcut = Shortcut::new_gd();
-                shortcut.set_events(&varray![&key.to_variant()]);
-                settings.add_shortcut(TOGGLE_SHORTCUT, &shortcut);
-            }
+            ensure_shortcut(&mut settings, TOGGLE_SHORTCUT, GKey::QUOTELEFT, true, false);
+            // Standard zoom chords, Cmd on macOS.
+            let meta = cfg!(target_os = "macos");
+            ensure_shortcut(&mut settings, INCREASE_FONT_SHORTCUT, GKey::EQUAL, !meta, meta);
+            ensure_shortcut(&mut settings, DECREASE_FONT_SHORTCUT, GKey::MINUS, !meta, meta);
+            ensure_shortcut(&mut settings, RESET_FONT_SHORTCUT, GKey::KEY_0, !meta, meta);
         }
 
         let mut panel = TerminalTabs::new_alloc();
@@ -602,7 +614,7 @@ impl IEditorPlugin for TerminalPanel {
         if !event.is_pressed() || event.is_echo() {
             return;
         }
-        if !toggle_shortcut_matches(&event) {
+        if !shortcut_matches(TOGGLE_SHORTCUT, &event) {
             return;
         }
         self.toggle_terminal_focus();
@@ -693,6 +705,13 @@ fn new_wired_terminal(owner: Gd<Object>) -> Gd<Terminal> {
         if let Some(shell) = configured_shell() {
             t.shell = shell.as_str().into();
         }
+        if let Some(size) = EditorInterface::singleton()
+            .get_editor_settings()
+            .map(|s| s.get_setting(FONT_SIZE_SETTING))
+            .and_then(|v| v.try_to::<i64>().ok())
+        {
+            t.font_size = (size as i32).clamp(6, 72);
+        }
     }
     for (signal, method) in [
         ("title_changed", "on_title_changed"),
@@ -719,6 +738,26 @@ fn ensure_setting(settings: &mut Gd<EditorSettings>, name: &str, default: &Varia
     settings.set_initial_value(name, default, false);
 }
 
+/// Register with the default when absent; user rebinds survive.
+fn ensure_shortcut(
+    settings: &mut Gd<EditorSettings>,
+    path: &str,
+    keycode: GKey,
+    ctrl: bool,
+    meta: bool,
+) {
+    if settings.get_shortcut(path).is_some() {
+        return;
+    }
+    let mut key = InputEventKey::new_gd();
+    key.set_keycode(keycode);
+    key.set_ctrl_pressed(ctrl);
+    key.set_meta_pressed(meta);
+    let mut shortcut = Shortcut::new_gd();
+    shortcut.set_events(&varray![&key.to_variant()]);
+    settings.add_shortcut(path, &shortcut);
+}
+
 fn add_hint(
     settings: &mut Gd<EditorSettings>,
     name: &str,
@@ -734,12 +773,12 @@ fn add_hint(
     settings.add_property_info(&info);
 }
 
-/// Match against the toggle shortcut's events directly; EditorSettings
+/// Match against the shortcut's events directly; EditorSettings
 /// `is_shortcut` warns when the path is not in its runtime registry.
-pub(crate) fn toggle_shortcut_matches(event: &Gd<InputEvent>) -> bool {
+pub(crate) fn shortcut_matches(path: &str, event: &Gd<InputEvent>) -> bool {
     EditorInterface::singleton()
         .get_editor_settings()
-        .and_then(|s| s.get_shortcut(TOGGLE_SHORTCUT))
+        .and_then(|s| s.get_shortcut(path))
         .is_some_and(|sc| sc.matches_event(event))
 }
 
