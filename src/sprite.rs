@@ -5,6 +5,7 @@
 
 use godot::classes::RenderingServer;
 use godot::prelude::*;
+use libghostty_vt::style::Underline;
 
 /// Draw `cp` procedurally into `cell`; false means it is not a sprite
 /// codepoint and the caller renders it as a font glyph instead. `thick`
@@ -24,6 +25,63 @@ pub fn draw(canvas: Rid, cell: Rect2, fg: Color, thick: f32, cp: u32) -> bool {
         _ => return false,
     }
     true
+}
+
+/// Text underline in one of the SGR 4:x styles, cell-perfect so neighbors
+/// tile. `y` is the top of the single underline in cell pixels. Shapes
+/// mirror ghostty's sprite font, clamped inside the cell.
+pub fn underline(canvas: Rid, cell: Rect2, color: Color, thick: f32, y: f32, style: Underline) {
+    let (w, h) = (cell.size.x, cell.size.y);
+    match style {
+        Underline::None => {}
+        Underline::Double => {
+            // A line above and below the single position, gap in between.
+            let yy = y.min(h - 2.0 * thick).max(thick);
+            rect(canvas, cell, 0.0, yy - thick, w, yy, color);
+            rect(canvas, cell, 0.0, yy + thick, w, yy + 2.0 * thick, color);
+        }
+        Underline::Dotted => {
+            // Square dots sized like ghostty's, spaced to match their size.
+            let d = (1.414 * thick).round().max(1.0);
+            let count = (w / (2.0 * d))
+                .ceil()
+                .min((w / (1.5 * d)).floor())
+                .min((w / (d + 1.0)).floor())
+                .max(1.0);
+            let yy = y.min(h - d);
+            let slot = w / count;
+            for i in 0..count as usize {
+                let x = (slot * (i as f32 + 0.5) - d / 2.0).round();
+                rect(canvas, cell, x, yy, x + d, yy + d, color);
+            }
+        }
+        Underline::Dashed => {
+            // Thirds: dash, gap, dash. The last dash clips at the cell edge.
+            let dash_w = (w / 3.0).floor() + 1.0;
+            rect(canvas, cell, 0.0, y, dash_w, y + thick, color);
+            rect(canvas, cell, 2.0 * dash_w, y, w.min(3.0 * dash_w), y + thick, color);
+        }
+        Underline::Curly => {
+            // One wave cycle per cell so neighbors connect, peak at the
+            // center, curvature 0.4 like ghostty.
+            let a = w / std::f32::consts::PI;
+            let top = y.min(h - a - thick).max(0.0);
+            let bottom = top + a;
+            let (c, r) = (0.5 * w, 0.4);
+            let mut points = Vec::with_capacity(17);
+            let up = ((0.0, bottom), (c * r, bottom), (c - c * r, top), (c, top));
+            let down = ((c, top), (c + c * r, top), (w - c * r, bottom), (w, bottom));
+            for i in 0..=8 {
+                points.push(cubic(up.0, up.1, up.2, up.3, i as f32 / 8.0));
+            }
+            for i in 1..=8 {
+                points.push(cubic(down.0, down.1, down.2, down.3, i as f32 / 8.0));
+            }
+            stroke(canvas, cell, &points, color, thick);
+        }
+        // Single, and any future style, as the plain line.
+        _ => rect(canvas, cell, 0.0, y, w, y + thick, color),
+    }
 }
 
 /// Quadrant bits tl=1, tr=2, bl=4, br=8, indexed from U+2596 (▖▗▘▙▚▛▜▝▞▟).

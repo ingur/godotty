@@ -17,7 +17,7 @@ use libghostty_vt::key::Mods as VtMods;
 use libghostty_vt::render::{CellIterator, CursorVisualStyle, RenderState, RowIterator};
 use libghostty_vt::screen::{CellWide, Screen};
 use libghostty_vt::selection::FormatOptions;
-use libghostty_vt::style::{RgbColor, Underline};
+use libghostty_vt::style::{RgbColor, StyleColor, Underline};
 use libghostty_vt::terminal::{
     ColorScheme, ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType, Mode,
     PrimaryDeviceAttributes, ScrollViewport, SecondaryDeviceAttributes, SizeReportSize,
@@ -1002,6 +1002,8 @@ impl State {
         rs.canvas_item_clear(canvas_fg);
         let snapshot = self.render_state.update(&self.vt)?;
         let colors = snapshot.colors()?;
+        // Palette for resolving SGR 58 underline color indexes.
+        let palette = self.vt.color_palette().ok();
 
         let bg = color(colors.background);
         let bg_changed = bg != self.bg;
@@ -1023,6 +1025,11 @@ impl State {
         // One baseline rule for text underlines and the underline cursor,
         // clamped so the line cannot escape the cell.
         let underline_y = self.geo.underline.min(self.geo.cell_h - thick);
+        // Strikethrough centers on lowercase, so baseline minus half of
+        // x-height plus thickness. JetBrains Mono's x-height ratio is 0.53.
+        let strike_y = (self.geo.ascent - 0.5 * (0.53 * self.font_size as f32 + thick))
+            .round()
+            .clamp(0.0, self.geo.cell_h - thick);
 
         let mut graphemes: Vec<char> = Vec::new();
         let mut run: Option<Run> = None;
@@ -1076,15 +1083,23 @@ impl State {
                 let mut bg = cell.bg_color()?;
                 let mut bold = false;
                 let mut italic = false;
-                let mut underline = false;
                 let mut faint = false;
+                let mut invisible = false;
+                let mut strikethrough = false;
+                let mut overline = false;
+                let mut underline = Underline::None;
+                let mut underline_color = StyleColor::None;
 
                 if cell.has_styling()? {
                     let style = cell.style()?;
                     bold = style.bold;
                     italic = style.italic;
                     faint = style.faint;
-                    underline = !matches!(style.underline, Underline::None);
+                    invisible = style.invisible;
+                    strikethrough = style.strikethrough;
+                    overline = style.overline;
+                    underline = style.underline;
+                    underline_color = style.underline_color;
                     if style.inverse {
                         let old_fg = fg;
                         fg = bg.unwrap_or(colors.background);
@@ -1099,6 +1114,15 @@ impl State {
 
                 if let Some(bg) = bg {
                     rs.canvas_item_add_rect(canvas_bg, cell_rect, color(bg));
+                }
+
+                // Concealed cells keep their background and draw no ink,
+                // like xterm. Decorations count as ink.
+                if invisible {
+                    flush(&mut run, y);
+                    x += self.geo.cell_w;
+                    col += 1;
+                    continue;
                 }
 
                 let mut fg = color(fg);
@@ -1161,11 +1185,27 @@ impl State {
                     }
                 }
 
-                if underline {
+                if !matches!(underline, Underline::None) {
+                    // Explicit SGR 58 color wins, else the text color.
+                    let ul = match underline_color {
+                        StyleColor::Rgb(c) => color(c),
+                        StyleColor::Palette(i) => palette
+                            .as_ref()
+                            .map(|p| color(p[i.0 as usize]))
+                            .unwrap_or(fg),
+                        StyleColor::None => fg,
+                    };
+                    sprite::underline(canvas_fg, cell_rect, ul, thick, underline_y, underline);
+                }
+                if strikethrough {
                     let line = Rect2::new(
-                        Vector2::new(x, y + underline_y),
+                        Vector2::new(x, y + strike_y),
                         Vector2::new(self.geo.cell_w, thick),
                     );
+                    rs.canvas_item_add_rect(canvas_fg, line, fg);
+                }
+                if overline {
+                    let line = Rect2::new(Vector2::new(x, y), Vector2::new(self.geo.cell_w, thick));
                     rs.canvas_item_add_rect(canvas_fg, line, fg);
                 }
 
