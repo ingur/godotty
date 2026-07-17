@@ -738,7 +738,8 @@ fn ensure_setting(settings: &mut Gd<EditorSettings>, name: &str, default: &Varia
     settings.set_initial_value(name, default, false);
 }
 
-/// Register with the default when absent; user rebinds survive.
+/// Always register the default; add_shortcut keeps saved user bindings and
+/// records the default as "original", which the shortcuts dialog requires.
 fn ensure_shortcut(
     settings: &mut Gd<EditorSettings>,
     path: &str,
@@ -746,9 +747,6 @@ fn ensure_shortcut(
     ctrl: bool,
     meta: bool,
 ) {
-    if settings.get_shortcut(path).is_some() {
-        return;
-    }
     let mut key = InputEventKey::new_gd();
     key.set_keycode(keycode);
     key.set_ctrl_pressed(ctrl);
