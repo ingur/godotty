@@ -75,7 +75,9 @@ pub struct Terminal {
     /// Auto follows the editor theme (or the OS dark mode in games).
     #[export(enum = (Auto, Dark, Light))]
     color_scheme: i32,
-    /// Set by the editor plugin; nodes in edited scenes stay inert.
+    /// Run inside the editor too, like a tool script. Ignored in games.
+    /// Off keeps terminals in edited scenes inert.
+    #[export]
     pub(crate) run_in_editor: bool,
     state: Option<State>,
 }
@@ -101,7 +103,7 @@ impl Terminal {
     }
 
     fn refresh_theme(&mut self) {
-        if !self.run_in_editor {
+        if !self.in_editor() {
             return;
         }
         let pref = self.scheme_pref();
@@ -118,7 +120,7 @@ impl Terminal {
     }
 
     fn refresh_ligatures(&mut self) {
-        if !self.run_in_editor {
+        if !self.in_editor() {
             return;
         }
         let pref = self.ligatures_pref();
@@ -169,12 +171,12 @@ impl IControl for Terminal {
             cwd: resolve_cwd(&self.working_directory.to_string()),
             login: self.login_shell,
         };
-        let theme = theme::resolve(self.run_in_editor, self.scheme_pref());
+        let theme = theme::resolve(self.in_editor(), self.scheme_pref());
         match State::new(&spawn, theme, size, parent_canvas) {
             Ok(state) => self.state = Some(state),
             Err(e) => godot_error!("[godotty] failed to start terminal: {e}"),
         }
-        if self.run_in_editor
+        if self.in_editor()
             && let Some(mut settings) = EditorInterface::singleton().get_editor_settings()
         {
             settings.connect_flags(
@@ -347,9 +349,15 @@ impl IControl for Terminal {
 }
 
 impl Terminal {
+    /// Exported games have no EditorInterface, so editor paths must stay
+    /// unreachable there even with the flag on.
+    fn in_editor(&self) -> bool {
+        self.run_in_editor && Engine::singleton().is_editor_hint()
+    }
+
     /// Node property in games; the editor setting for editor terminals.
     fn scheme_pref(&self) -> i32 {
-        if !self.run_in_editor {
+        if !self.in_editor() {
             return self.color_scheme;
         }
         EditorInterface::singleton()
@@ -361,7 +369,7 @@ impl Terminal {
     }
 
     fn ligatures_pref(&self) -> bool {
-        if !self.run_in_editor {
+        if !self.in_editor() {
             return self.ligatures;
         }
         EditorInterface::singleton()
