@@ -69,6 +69,7 @@ pub struct Terminal {
     #[export]
     working_directory: GString,
     /// Spawn as a login shell so profiles rebuild the environment.
+    /// Passes -l, so turn this off when shell is not a shell.
     #[export]
     login_shell: bool,
     /// Auto follows the editor theme (or the OS dark mode in games).
