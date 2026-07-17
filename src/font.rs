@@ -185,12 +185,14 @@ impl Fonts {
             if font.load_dynamic_font(path) != GdError::OK {
                 continue;
             }
-            if !font.has_char(cp) {
-                continue;
-            }
+            // Keep every loaded font: the extra scan serves codepoints this
+            // one covers even when the requested one is missing from it.
+            let covers = font.has_char(cp);
             let mut extra = self.extra.borrow_mut();
             extra.push(font.upcast());
-            return (self.fonts.len() + extra.len() - 1) as i16;
+            if covers {
+                return (self.fonts.len() + extra.len() - 1) as i16;
+            }
         }
         -1
     }
