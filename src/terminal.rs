@@ -393,6 +393,29 @@ impl Terminal {
                 self.base_mut().accept_event();
                 return;
             }
+
+            // Scrollback keys. Primary screen only, so TUIs keep them.
+            let shift_only = key.is_shift_pressed()
+                && !key.is_ctrl_pressed()
+                && !key.is_alt_pressed()
+                && !key.is_meta_pressed();
+            if shift_only && let Some(st) = self.state.as_mut() {
+                let scroll = match key.get_keycode() {
+                    GKey::PAGEUP => Some(ScrollViewport::Delta(-(st.geo.rows as isize))),
+                    GKey::PAGEDOWN => Some(ScrollViewport::Delta(st.geo.rows as isize)),
+                    GKey::HOME => Some(ScrollViewport::Top),
+                    GKey::END => Some(ScrollViewport::Bottom),
+                    _ => None,
+                };
+                if let Some(scroll) = scroll
+                    && st.vt.active_screen().ok() != Some(Screen::Alternate)
+                {
+                    st.vt.scroll_viewport(scroll);
+                    st.needs_paint = true;
+                    self.base_mut().accept_event();
+                    return;
+                }
+            }
         }
 
         if let Some(st) = self.state.as_mut().filter(|st| !st.exited) {
