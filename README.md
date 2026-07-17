@@ -65,6 +65,7 @@ Requires Godot 4.7+ on Linux, macOS, or Windows 10+.
 
 - Ctrl+Shift+P and type "terminal" to create one in a dock, the bottom panel, or the main screen.
 - Ctrl+` toggles the terminal panel in the bottom panel.
+- Ctrl+= / - / 0 (Cmd on macOS) zooms the focused terminal.
 - Drag docks anywhere, or float them as windows.
 - Settings live in Editor Settings under `godotty`.
 
