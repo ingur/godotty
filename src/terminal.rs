@@ -81,6 +81,9 @@ pub struct Terminal {
     #[export]
     pub(crate) run_in_editor: bool,
     state: Option<State>,
+    /// Last IME candidate-window position pushed to the display server, in
+    /// window pixels. Cached so we only re-send when the cursor moves.
+    ime_pos: Vector2i,
 }
 
 #[godot_api]
@@ -148,6 +151,7 @@ impl IControl for Terminal {
             color_scheme: theme::SCHEME_AUTO,
             run_in_editor: false,
             state: None,
+            ime_pos: Vector2i::new(i32::MIN, i32::MIN),
         }
     }
 
@@ -291,6 +295,16 @@ impl IControl for Terminal {
         if bg_changed {
             self.base_mut().queue_redraw();
         }
+
+        // Keep the IME candidate window tracking the cursor while focused.
+        if let Some(local) = self
+            .state
+            .as_ref()
+            .filter(|st| st.focused && st.win_focused)
+            .map(|st| st.cursor_px.get())
+        {
+            self.refresh_ime_position(local);
+        }
     }
 
     fn gui_input(&mut self, event: Gd<InputEvent>) {
@@ -319,20 +333,39 @@ impl IControl for Terminal {
             st.title.clear();
             st.title_timer = TITLE_POLL_SECS;
         }
-        if (what == ControlNotification::FOCUS_ENTER || what == ControlNotification::FOCUS_EXIT)
-            && let Some(st) = self.state.as_mut()
-        {
-            st.focused = what == ControlNotification::FOCUS_ENTER;
-            st.needs_paint = true;
-            st.report_focus();
+        if what == ControlNotification::FOCUS_ENTER || what == ControlNotification::FOCUS_EXIT {
+            if let Some(st) = self.state.as_mut() {
+                st.focused = what == ControlNotification::FOCUS_ENTER;
+                if !st.focused {
+                    st.preedit.clear();
+                }
+                st.needs_paint = true;
+                st.report_focus();
+            }
+            self.sync_ime();
         }
-        if (what == ControlNotification::WM_WINDOW_FOCUS_IN
-            || what == ControlNotification::WM_WINDOW_FOCUS_OUT)
-            && let Some(st) = self.state.as_mut()
+        if what == ControlNotification::WM_WINDOW_FOCUS_IN
+            || what == ControlNotification::WM_WINDOW_FOCUS_OUT
         {
-            st.win_focused = what == ControlNotification::WM_WINDOW_FOCUS_IN;
+            if let Some(st) = self.state.as_mut() {
+                st.win_focused = what == ControlNotification::WM_WINDOW_FOCUS_IN;
+                if !st.win_focused {
+                    st.preedit.clear();
+                }
+                st.needs_paint = true;
+                st.report_focus();
+            }
+            self.sync_ime();
+        }
+        // The composing (preedit) string, delivered app-wide; keep it only
+        // while this terminal holds focus. Empty text means commit or cancel.
+        if what == ControlNotification::OS_IME_UPDATE
+            && let Some(st) = self.state.as_mut().filter(|st| st.focused && st.win_focused)
+        {
+            let ds = DisplayServer::singleton();
+            st.preedit = ds.ime_get_text().to_string();
+            st.preedit_caret = ds.ime_get_selection().x;
             st.needs_paint = true;
-            st.report_focus();
         }
         if what == ControlNotification::THEME_CHANGED {
             self.refresh_theme();
@@ -379,6 +412,64 @@ impl Terminal {
             .map(|s| s.get_setting(plugin::LIGATURES_SETTING))
             .and_then(|v| v.try_to::<bool>().ok())
             .unwrap_or(true)
+    }
+
+    /// Enable the OS IME while focused so CJK and other composed input reaches
+    /// the pty, and seed the candidate window at the cursor. Deactivates on
+    /// blur, mirroring how LineEdit drives IME from its focus notifications.
+    /// Committed text then arrives as ordinary unicode key events, which
+    /// `encode_key` already forwards; `im_active` is a per-window flag, so the
+    /// focus enter/exit toggle keeps us consistent with the editor's fields.
+    fn sync_ime(&mut self) {
+        if self.state.is_none() {
+            return;
+        }
+        let mut ds = DisplayServer::singleton();
+        if !ds.has_feature(DisplayFeature::IME) {
+            return;
+        }
+        let Some(window) = self.base().get_window() else {
+            return;
+        };
+        let window_id = window.get_window_id();
+        let active = self
+            .state
+            .as_ref()
+            .is_some_and(|st| st.focused && st.win_focused);
+        ds.window_set_ime_active_ex(active)
+            .window_id(window_id)
+            .done();
+        if active {
+            // Force the next refresh to re-send even if the cursor sat still.
+            self.ime_pos = Vector2i::new(i32::MIN, i32::MIN);
+            let local = self
+                .state
+                .as_ref()
+                .map(|st| st.cursor_px.get())
+                .unwrap_or(Vector2::ZERO);
+            self.refresh_ime_position(local);
+        }
+    }
+
+    /// Move the IME candidate window to the cursor, given its control-local
+    /// pixel offset, skipping the call when the window position is unchanged.
+    fn refresh_ime_position(&mut self, local: Vector2) {
+        let mut ds = DisplayServer::singleton();
+        if !ds.has_feature(DisplayFeature::IME) {
+            return;
+        }
+        let Some(window) = self.base().get_window() else {
+            return;
+        };
+        let global = self.base().get_global_position() + local;
+        let pos = Vector2i::new(global.x as i32, global.y as i32);
+        if pos == self.ime_pos {
+            return;
+        }
+        self.ime_pos = pos;
+        ds.window_set_ime_position_ex(pos)
+            .window_id(window.get_window_id())
+            .done();
     }
 
     fn handle_key(&mut self, key: &Gd<InputEventKey>) {
@@ -803,6 +894,16 @@ struct State {
     since_repaint: f64,
     pending_size: Option<Vector2>,
     settle: f64,
+    /// Cursor position in control-local pixels, updated each repaint, used to
+    /// anchor the IME candidate window. Interior mutable so `repaint` can set
+    /// it while the render snapshot still borrows the state.
+    cursor_px: Cell<Vector2>,
+    /// In-progress IME composition (preedit) drawn as an overlay at the
+    /// cursor, empty when not composing. Never sent to the pty; only the
+    /// committed text is, and that arrives as ordinary key events.
+    preedit: String,
+    /// Caret offset within `preedit`, in UTF-16 units, from the IME selection.
+    preedit_caret: i32,
 }
 
 impl Drop for State {
@@ -943,6 +1044,9 @@ impl State {
             since_repaint: REPAINT_MIN_SECS,
             pending_size: None,
             settle: 0.0,
+            cursor_px: Cell::new(Vector2::new(PAD, PAD)),
+            preedit: String::new(),
+            preedit_caret: 0,
         })
     }
 
@@ -1348,12 +1452,67 @@ impl State {
         self.runs.end_frame();
 
         if let Some(vp) = cursor_vp {
-            let c = color(colors.cursor.unwrap_or(colors.foreground));
-            let wide_cursor = matches!(&cursor_cell, Some((.., true)));
             let origin = Vector2::new(
                 PAD + f32::from(vp.x) * self.geo.cell_w,
                 PAD + vp.y as f32 * self.geo.cell_h,
             );
+            // Anchor the IME candidate window just below the cursor line.
+            self.cursor_px
+                .set(Vector2::new(origin.x, origin.y + self.geo.cell_h));
+
+            if self.focused && self.win_focused && !self.preedit.is_empty() {
+                // Draw the IME composition inline over the grid, underlined,
+                // with a bar caret at the composition point. It replaces the
+                // block cursor while composing; the pty sees none of this,
+                // only the committed text (which arrives as key events).
+                let fg = color(colors.foreground);
+                let bg = color(colors.background);
+                let style = Fonts::style_index(false, false);
+                let caret_units = self.preedit_caret.max(0) as usize;
+                let mut x = origin.x;
+                let mut caret_x = origin.x;
+                let mut acc_units = 0usize;
+                for ch in self.preedit.chars() {
+                    let cp = ch as u32;
+                    let w = self.geo.cell_w * if is_wide(cp) { 2.0 } else { 1.0 };
+                    let cell_rect =
+                        Rect2::new(Vector2::new(x, origin.y), Vector2::new(w, self.geo.cell_h));
+                    // Cover the grid text underneath, then draw the glyph.
+                    rs.canvas_item_add_rect(canvas_fg, cell_rect, bg);
+                    let baseline = Vector2::new(x, origin.y + self.geo.ascent);
+                    if !sprite::draw(canvas_fg, cell_rect, fg, self.geo.thick, cp)
+                        && let Some(font) = self.fonts.resolve(cp, style, || is_wide(cp))
+                    {
+                        font.draw_char_ex(canvas_fg, baseline, cp, self.font_size)
+                            .modulate(fg)
+                            .done();
+                    }
+                    // Underline the whole composition.
+                    rs.canvas_item_add_rect(
+                        canvas_fg,
+                        Rect2::new(Vector2::new(x, origin.y + underline_y), Vector2::new(w, thick)),
+                        fg,
+                    );
+                    x += w;
+                    acc_units += ch.len_utf16();
+                    if acc_units <= caret_units {
+                        caret_x = x;
+                    }
+                }
+                // Bar caret at the composition point, like the Bar cursor.
+                rs.canvas_item_add_rect(
+                    canvas_fg,
+                    Rect2::new(
+                        Vector2::new(caret_x - ((thick + 1.0) / 2.0).floor(), origin.y),
+                        Vector2::new(thick, self.geo.cell_h),
+                    ),
+                    fg,
+                );
+                return Ok(bg_changed);
+            }
+
+            let c = color(colors.cursor.unwrap_or(colors.foreground));
+            let wide_cursor = matches!(&cursor_cell, Some((.., true)));
             let size = Vector2::new(
                 self.geo.cell_w * if wide_cursor { 2.0 } else { 1.0 },
                 self.geo.cell_h,
@@ -1455,6 +1614,30 @@ impl State {
 
 fn color(c: RgbColor) -> Color {
     Color::from_rgba8(c.r, c.g, c.b, 255)
+}
+
+/// East Asian Wide/Fullwidth ranges: a preedit codepoint that takes two
+/// cells. libghostty owns cell widths for the grid, but the IME overlay is
+/// drawn independently, so it needs its own check. Covers the CJK, Kana,
+/// Hangul, fullwidth and emoji blocks that composition actually produces.
+fn is_wide(cp: u32) -> bool {
+    matches!(cp,
+        0x1100..=0x115F   // Hangul Jamo
+        | 0x2329 | 0x232A // angle brackets
+        | 0x2E80..=0x303E // CJK radicals, Kangxi, CJK symbols
+        | 0x3041..=0x33FF // Kana, CJK symbols, enclosed
+        | 0x3400..=0x4DBF // CJK Ext A
+        | 0x4E00..=0x9FFF // CJK Unified
+        | 0xA000..=0xA4CF // Yi
+        | 0xAC00..=0xD7A3 // Hangul syllables
+        | 0xF900..=0xFAFF // CJK compatibility
+        | 0xFE10..=0xFE19 // vertical forms
+        | 0xFE30..=0xFE6F // CJK compatibility forms
+        | 0xFF00..=0xFF60 // fullwidth forms
+        | 0xFFE0..=0xFFE6 // fullwidth signs
+        | 0x1F300..=0x1FAFF // emoji and pictographs
+        | 0x20000..=0x3FFFD // CJK Ext B and beyond
+    )
 }
 
 /// Copy/paste chord: Cmd on macOS, Ctrl+Shift elsewhere.
